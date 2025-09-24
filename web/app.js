@@ -91,19 +91,26 @@ function applyUpdates(updates) {
   render();
 }
 
-function vecToArray(vector) {
-  const result = [];
-  const size = vector.size();
-  for (let i = 0; i < size; i += 1) {
-    result.push(vector.get(i));
+function normalizeUpdates(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value.size === "function") {
+    const result = [];
+    const size = value.size();
+    for (let i = 0; i < size; i += 1) {
+      result.push(value.get(i));
+    }
+    if (typeof value.delete === "function") {
+      value.delete();
+    }
+    return result;
   }
-  vector.delete();
-  return result;
+  return [];
 }
 
 function revealCell(x, y) {
   if (!game || !alive) return;
-  const updates = vecToArray(game.reveal(x, y));
+  const updates = normalizeUpdates(game.reveal(x, y));
   applyUpdates(updates);
   alive = game.isAlive();
   if (!alive) {
@@ -113,7 +120,7 @@ function revealCell(x, y) {
 
 function toggleFlag(x, y) {
   if (!game) return;
-  const updates = vecToArray(game.toggleFlag(x, y));
+  const updates = normalizeUpdates(game.toggleFlag(x, y));
   applyUpdates(updates);
 }
 
