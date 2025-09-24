@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: emscripten/emsdk:3.1.57
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build WebAssembly bundle
+        run: make build
+
+      - name: Verify build output
+        run: |
+          test -s dist/game.js
+          test -s dist/game.wasm
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-build
+          path: dist
+          if-no-files-found: error

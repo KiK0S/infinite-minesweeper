@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Infinite Minesweeper</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="top-bar">
+      <h1>Infinite Minesweeper</h1>
+      <div class="controls">
+        <button id="reset-button" type="button">New Seed</button>
+        <button id="flag-mode" type="button" class="toggle">Flag Mode</button>
+        <label class="density">
+          Mine Density
+          <input id="density" type="range" min="5" max="35" value="18" />
+          <span id="density-value">18%</span>
+        </label>
+        <span id="status">Loading…</span>
+      </div>
+    </header>
+    <main>
+      <canvas id="board" tabindex="0"></canvas>
+      <section class="help">
+        <h2>Controls</h2>
+        <ul>
+          <li>Click or tap a cell to reveal it.</li>
+          <li>Right-click or enable <em>Flag Mode</em> to toggle a flag.</li>
+          <li>Drag to pan, use the mouse wheel or pinch to zoom.</li>
+          <li>After triggering a mine press <strong>New Seed</strong> to restart.</li>
+        </ul>
+      </section>
+    </main>
+    <script src="game.js"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
