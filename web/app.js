@@ -69,6 +69,10 @@ function keyFor(x, y) {
 }
 
 function applyUpdates(updates) {
+  if (!updates || updates.length === 0) {
+    render();
+    return;
+  }
   let detonated = false;
   for (const update of updates) {
     board.set(keyFor(update.x, update.y), {
@@ -91,19 +95,9 @@ function applyUpdates(updates) {
   render();
 }
 
-function vecToArray(vector) {
-  const result = [];
-  const size = vector.size();
-  for (let i = 0; i < size; i += 1) {
-    result.push(vector.get(i));
-  }
-  vector.delete();
-  return result;
-}
-
 function revealCell(x, y) {
   if (!game || !alive) return;
-  const updates = vecToArray(game.reveal(x, y));
+  const updates = game.reveal(x, y);
   applyUpdates(updates);
   alive = game.isAlive();
   if (!alive) {
@@ -113,7 +107,7 @@ function revealCell(x, y) {
 
 function toggleFlag(x, y) {
   if (!game) return;
-  const updates = vecToArray(game.toggleFlag(x, y));
+  const updates = game.toggleFlag(x, y);
   applyUpdates(updates);
 }
 
