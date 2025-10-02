@@ -17,13 +17,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: emscripten/emsdk:3.1.57
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build WebAssembly bundle
+      - name: Build static site
         run: make build
 
       - name: Upload GitHub Pages artifact
