@@ -1,8 +1,10 @@
 import * as PIXI from "https://cdn.jsdelivr.net/npm/pixi.js@7.3.3/dist/pixi.mjs";
 
 const CELL_SIZE = 48;
+const CHUNK_SIZE = 8;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 2.8;
+const GROUPING_THRESHOLD = 0.65;
 const BACKGROUND_COLOR = 0x0f172a;
 const REVEALED_COLOR = 0x1e293b;
 const EXPLODED_COLOR = 0xb91c1c;
@@ -76,18 +78,28 @@ document.body.appendChild(app.view);
 
 const board = new PIXI.Container();
 board.scale.set(1);
+board.sortableChildren = true;
 app.stage.addChild(board);
+
+const chunkLayer = new PIXI.Container();
+chunkLayer.zIndex = 0;
+chunkLayer.eventMode = "none";
+chunkLayer.visible = false;
+board.addChild(chunkLayer);
+
+const cellLayer = new PIXI.Container();
+cellLayer.zIndex = 1;
+cellLayer.eventMode = "none";
+board.addChild(cellLayer);
 
 const interactionLayer = new PIXI.Graphics();
 interactionLayer.beginFill(0x000000, 0.001);
 interactionLayer.drawRect(-200000, -200000, 400000, 400000);
 interactionLayer.endFill();
+interactionLayer.zIndex = 2;
 interactionLayer.eventMode = "static";
 interactionLayer.cursor = "pointer";
 board.addChild(interactionLayer);
-
-const cellLayer = new PIXI.Container();
-board.addChild(cellLayer);
 
 const hud = {
   seedInput: document.getElementById("seed"),
@@ -120,8 +132,21 @@ const state = {
 const mineCache = new Map();
 const cellStates = new Map();
 const cellGraphics = new Map();
+const chunkGraphics = new Map();
+
+const CHUNK_WORLD_SIZE = CHUNK_SIZE * CELL_SIZE;
+
+const chunkStyles = {
+  untouched: { fill: 0x0f172a, alpha: 0.22, border: 0x1e293b, borderAlpha: 0.28 },
+  interesting: { fill: 0x38bdf8, alpha: 0.24, border: 0x7dd3fc, borderAlpha: 0.45 },
+  danger: { fill: EXPLODED_COLOR, alpha: 0.35, border: 0xf87171, borderAlpha: 0.6 },
+};
 
 function cellKey(x, y) {
+  return `${x},${y}`;
+}
+
+function chunkKey(x, y) {
   return `${x},${y}`;
 }
 
@@ -210,6 +235,12 @@ function clearBoardGraphics() {
   }
   cellGraphics.clear();
   cellLayer.removeChildren();
+
+  for (const graphic of chunkGraphics.values()) {
+    graphic.destroy();
+  }
+  chunkGraphics.clear();
+  chunkLayer.removeChildren();
 }
 
 function resetGame({ newSeed, newDensity, preserveView = false } = {}) {
@@ -316,6 +347,76 @@ function syncCellGraphic(x, y) {
   }
 }
 
+function determineChunkStatus(chunkX, chunkY) {
+  const startX = chunkX * CHUNK_SIZE;
+  const startY = chunkY * CHUNK_SIZE;
+  const endX = startX + CHUNK_SIZE;
+  const endY = startY + CHUNK_SIZE;
+  let hasInteraction = false;
+
+  for (let x = startX; x < endX; x += 1) {
+    for (let y = startY; y < endY; y += 1) {
+      const cell = cellStates.get(cellKey(x, y));
+      if (!cell) {
+        continue;
+      }
+      if (cell.revealed && cell.mine) {
+        return "danger";
+      }
+      if (cell.revealed || cell.flagged) {
+        hasInteraction = true;
+      }
+    }
+  }
+
+  return hasInteraction ? "interesting" : "untouched";
+}
+
+function syncChunkGraphic(chunkX, chunkY) {
+  const key = chunkKey(chunkX, chunkY);
+  let graphic = chunkGraphics.get(key);
+  if (!graphic) {
+    graphic = new PIXI.Graphics();
+    graphic.eventMode = "none";
+    chunkGraphics.set(key, graphic);
+    chunkLayer.addChild(graphic);
+  }
+
+  const style = chunkStyles[determineChunkStatus(chunkX, chunkY)];
+  const { fill, alpha, border, borderAlpha } = style;
+
+  graphic.clear();
+  graphic.lineStyle(1, border, borderAlpha);
+  graphic.beginFill(fill, alpha);
+  graphic.drawRect(0, 0, CHUNK_WORLD_SIZE, CHUNK_WORLD_SIZE);
+  graphic.endFill();
+  graphic.position.set(chunkX * CHUNK_WORLD_SIZE, chunkY * CHUNK_WORLD_SIZE);
+}
+
+function updateChunkLayer(minCellX, maxCellX, minCellY, maxCellY) {
+  const minChunkX = Math.floor(minCellX / CHUNK_SIZE);
+  const maxChunkX = Math.floor(maxCellX / CHUNK_SIZE);
+  const minChunkY = Math.floor(minCellY / CHUNK_SIZE);
+  const maxChunkY = Math.floor(maxCellY / CHUNK_SIZE);
+
+  const needed = new Set();
+
+  for (let cx = minChunkX; cx <= maxChunkX; cx += 1) {
+    for (let cy = minChunkY; cy <= maxChunkY; cy += 1) {
+      const key = chunkKey(cx, cy);
+      needed.add(key);
+      syncChunkGraphic(cx, cy);
+    }
+  }
+
+  for (const [key, graphic] of chunkGraphics.entries()) {
+    if (!needed.has(key)) {
+      graphic.destroy();
+      chunkGraphics.delete(key);
+    }
+  }
+}
+
 function refreshVisibleCells() {
   const width = app.renderer.width;
   const height = app.renderer.height;
@@ -325,6 +426,16 @@ function refreshVisibleCells() {
   const maxCellX = Math.floor(bottomRight.x / CELL_SIZE) + 1;
   const minCellY = Math.floor(topLeft.y / CELL_SIZE) - 1;
   const maxCellY = Math.floor(bottomRight.y / CELL_SIZE) + 1;
+
+  if (state.scale < GROUPING_THRESHOLD) {
+    chunkLayer.visible = true;
+    cellLayer.visible = false;
+    updateChunkLayer(minCellX, maxCellX, minCellY, maxCellY);
+    return;
+  }
+
+  chunkLayer.visible = false;
+  cellLayer.visible = true;
 
   const needed = new Set();
 
@@ -355,19 +466,29 @@ function refreshVisibleCells() {
 
 function revealCell(x, y) {
   if (state.exploded) {
-    return;
+    return false;
   }
   const start = getCellState(x, y);
-  if (start.flagged || start.revealed) {
-    return;
+  if (start.flagged) {
+    return false;
   }
+
+  if (start.revealed) {
+    if (start.adjacent > 0) {
+      return revealNeighborsOfNumber(x, y);
+    }
+    return false;
+  }
+
+  let anyRevealed = false;
 
   if (start.mine) {
     start.revealed = true;
     syncCellGraphic(x, y);
     state.exploded = true;
     updateStatus();
-    return;
+    state.needsRender = true;
+    return true;
   }
 
   const stack = [[x, y]];
@@ -389,6 +510,7 @@ function revealCell(x, y) {
     cell.revealed = true;
     state.revealedSafe += 1;
     syncCellGraphic(cx, cy);
+    anyRevealed = true;
 
     if (cell.adjacent === 0) {
       for (const [dx, dy] of neighborOffsets) {
@@ -403,22 +525,54 @@ function revealCell(x, y) {
   }
 
   updateStatus();
+  if (anyRevealed) {
+    state.needsRender = true;
+  }
+  return anyRevealed;
 }
 
 function toggleFlag(x, y) {
   if (state.exploded) {
-    return;
+    return false;
   }
   const cell = getCellState(x, y);
   if (cell.revealed) {
-    return;
+    return false;
   }
   cell.flagged = !cell.flagged;
   syncCellGraphic(x, y);
+  state.needsRender = true;
+  return true;
 }
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function revealNeighborsOfNumber(x, y) {
+  const center = getCellState(x, y);
+  if (!center.revealed || center.adjacent === 0) {
+    return false;
+  }
+
+  let changed = false;
+
+  for (const [dx, dy] of neighborOffsets) {
+    const nx = x + dx;
+    const ny = y + dy;
+    const neighbor = getCellState(nx, ny);
+    if (neighbor.flagged || neighbor.revealed) {
+      continue;
+    }
+    if (revealCell(nx, ny)) {
+      changed = true;
+    }
+    if (state.exploded) {
+      break;
+    }
+  }
+
+  return changed;
 }
 
 function handleWheel(event) {
