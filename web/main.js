@@ -125,6 +125,7 @@ const overlays = {
 const STORAGE_KEY = "infinite-minesweeper-save-v2";
 const SAVE_DEBOUNCE = 250;
 const START_REGION_SIZE = 30;
+const LONG_PRESS_DURATION = 450;
 
 const forcedSafeCells = new Set();
 let warningTimeoutId = null;
@@ -139,11 +140,16 @@ const state = {
   pointer: {
     pointerId: null,
     button: 0,
+    pointerType: "mouse",
     startX: 0,
     startY: 0,
     lastX: 0,
     lastY: 0,
+    startCellX: 0,
+    startCellY: 0,
     dragging: false,
+    longPressTimeout: null,
+    longPressTriggered: false,
   },
   needsRender: true,
   revealedSafe: 0,
@@ -652,6 +658,7 @@ function hideTargetIndicator() {
     return;
   }
   indicator.classList.remove("is-visible");
+  cancelLongPressTimer();
 }
 
 function cancelPendingSave() {
@@ -741,104 +748,107 @@ function saveGame() {
 }
 
 function applySavedGame(data) {
-  if (!data) {
+  if (!data || typeof data !== "object") {
     return;
   }
 
   state.restoring = true;
-  forcedSafeCells.clear();
-  if (Array.isArray(data.forcedSafe)) {
-    for (const key of data.forcedSafe) {
-      if (typeof key === "string") {
-        forcedSafeCells.add(key);
+  try {
+    forcedSafeCells.clear();
+    if (Array.isArray(data.forcedSafe)) {
+      for (const key of data.forcedSafe) {
+        if (typeof key === "string") {
+          forcedSafeCells.add(key);
+        }
       }
     }
-  }
 
-  mineCache.clear();
-  cellStates.clear();
-  blockStates.clear();
-  clearBoardGraphics();
+    mineCache.clear();
+    cellStates.clear();
+    blockStates.clear();
+    clearBoardGraphics();
 
-  if (typeof data.scale === "number" && Number.isFinite(data.scale)) {
-    state.scale = clamp(data.scale, MIN_SCALE, MAX_SCALE);
-    board.scale.set(state.scale);
-  }
-  if (
-    data.boardPosition &&
-    typeof data.boardPosition.x === "number" &&
-    typeof data.boardPosition.y === "number"
-  ) {
-    board.position.set(data.boardPosition.x, data.boardPosition.y);
-  }
-
-  state.startRegionGenerated = Boolean(data.startRegionGenerated) || forcedSafeCells.size > 0;
-  if (
-    data.startRegionOrigin &&
-    typeof data.startRegionOrigin.x === "number" &&
-    typeof data.startRegionOrigin.y === "number"
-  ) {
-    state.startRegionOrigin = {
-      x: Math.trunc(data.startRegionOrigin.x),
-      y: Math.trunc(data.startRegionOrigin.y),
-    };
-  } else {
-    state.startRegionOrigin = null;
-  }
-  state.revealedSafe = 0;
-  state.exploded = false;
-
-  const revealedList = Array.isArray(data.revealed) ? data.revealed : [];
-  for (const entry of revealedList) {
-    if (!Array.isArray(entry) || entry.length < 2) {
-      continue;
+    if (typeof data.scale === "number" && Number.isFinite(data.scale)) {
+      state.scale = clamp(data.scale, MIN_SCALE, MAX_SCALE);
+      board.scale.set(state.scale);
     }
-    const [x, y] = entry;
-    const cell = getCellState(x, y);
-    cell.revealed = true;
-    if (!cell.mine) {
-      state.revealedSafe += 1;
+    if (
+      data.boardPosition &&
+      typeof data.boardPosition.x === "number" &&
+      typeof data.boardPosition.y === "number"
+    ) {
+      board.position.set(data.boardPosition.x, data.boardPosition.y);
     }
-    registerRevealedCell(x, y);
-    syncCellGraphic(x, y);
+
+    state.startRegionGenerated = Boolean(data.startRegionGenerated) || forcedSafeCells.size > 0;
+    if (
+      data.startRegionOrigin &&
+      typeof data.startRegionOrigin.x === "number" &&
+      typeof data.startRegionOrigin.y === "number"
+    ) {
+      state.startRegionOrigin = {
+        x: Math.trunc(data.startRegionOrigin.x),
+        y: Math.trunc(data.startRegionOrigin.y),
+      };
+    } else {
+      state.startRegionOrigin = null;
+    }
+    state.revealedSafe = 0;
+    state.exploded = false;
+
+    const revealedList = Array.isArray(data.revealed) ? data.revealed : [];
+    for (const entry of revealedList) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const [x, y] = entry;
+      const cell = getCellState(x, y);
+      cell.revealed = true;
+      if (!cell.mine) {
+        state.revealedSafe += 1;
+      }
+      registerRevealedCell(x, y);
+      syncCellGraphic(x, y);
+    }
+
+    const flaggedList = Array.isArray(data.flagged) ? data.flagged : [];
+    for (const entry of flaggedList) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const [x, y] = entry;
+      const cell = getCellState(x, y);
+      if (!cell.revealed) {
+        cell.flagged = true;
+      }
+      syncCellGraphic(x, y);
+    }
+
+    if (typeof data.revealedSafe === "number" && Number.isFinite(data.revealedSafe)) {
+      state.revealedSafe = data.revealedSafe;
+    }
+
+    const lockedList = Array.isArray(data.lockedBlocks) ? data.lockedBlocks : [];
+    for (const entry of lockedList) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const [bx, by] = entry;
+      const block = getBlockState(bx, by);
+      if (!block.completed) {
+        block.locked = true;
+        refreshBlockGraphics(bx, by);
+      }
+    }
+
+    evaluateAllLockedBlocks();
+
+    updateStatus();
+    state.needsRender = true;
+    lastSavedSnapshot = JSON.stringify(data);
+  } finally {
+    state.restoring = false;
   }
-
-  const flaggedList = Array.isArray(data.flagged) ? data.flagged : [];
-  for (const entry of flaggedList) {
-    if (!Array.isArray(entry) || entry.length < 2) {
-      continue;
-    }
-    const [x, y] = entry;
-    const cell = getCellState(x, y);
-    if (!cell.revealed) {
-      cell.flagged = true;
-    }
-    syncCellGraphic(x, y);
-  }
-
-  if (typeof data.revealedSafe === "number" && Number.isFinite(data.revealedSafe)) {
-    state.revealedSafe = data.revealedSafe;
-  }
-
-  const lockedList = Array.isArray(data.lockedBlocks) ? data.lockedBlocks : [];
-  for (const entry of lockedList) {
-    if (!Array.isArray(entry) || entry.length < 2) {
-      continue;
-    }
-    const [bx, by] = entry;
-    const block = getBlockState(bx, by);
-    if (!block.completed) {
-      block.locked = true;
-      refreshBlockGraphics(bx, by);
-    }
-  }
-
-  evaluateAllLockedBlocks();
-
-  updateStatus();
-  state.needsRender = true;
-  state.restoring = false;
-  lastSavedSnapshot = JSON.stringify(data);
   scheduleSave();
 }
 
@@ -1181,6 +1191,26 @@ function revealCell(x, y) {
   return anyRevealed;
 }
 
+function warnIfOverFlagged(x, y) {
+  for (const [dx, dy] of neighborOffsets) {
+    const neighbor = cellStates.get(cellKey(x + dx, y + dy));
+    if (!neighbor || !neighbor.revealed || neighbor.adjacent === 0) {
+      continue;
+    }
+    let flaggedNeighbors = 0;
+    for (const [ndx, ndy] of neighborOffsets) {
+      const around = cellStates.get(cellKey(x + dx + ndx, y + dy + ndy));
+      if (around?.flagged) {
+        flaggedNeighbors += 1;
+      }
+    }
+    if (flaggedNeighbors > neighbor.adjacent) {
+      showWarning("Too many flags are marked around this number.");
+      return;
+    }
+  }
+}
+
 function toggleFlag(x, y) {
   if (state.exploded) {
     return false;
@@ -1195,6 +1225,9 @@ function toggleFlag(x, y) {
   }
   const { bx, by } = pointToBlock(x, y);
   cell.flagged = !cell.flagged;
+  if (cell.flagged) {
+    warnIfOverFlagged(x, y);
+  }
   syncCellGraphic(x, y);
   checkBlockAutoComplete(bx, by);
   state.needsRender = true;
@@ -1275,18 +1308,43 @@ function handleWheel(event) {
   scheduleSave();
 }
 
+function cancelLongPressTimer() {
+  if (state.pointer.longPressTimeout !== null) {
+    clearTimeout(state.pointer.longPressTimeout);
+    state.pointer.longPressTimeout = null;
+  }
+}
+
+function scheduleLongPress(event) {
+  cancelLongPressTimer();
+  if (state.pointer.pointerType === "mouse") {
+    return;
+  }
+  const { cx, cy } = screenToCell(event.global.x, event.global.y);
+  state.pointer.startCellX = cx;
+  state.pointer.startCellY = cy;
+  state.pointer.longPressTimeout = window.setTimeout(() => {
+    state.pointer.longPressTimeout = null;
+    state.pointer.longPressTriggered = true;
+    toggleFlag(state.pointer.startCellX, state.pointer.startCellY);
+  }, LONG_PRESS_DURATION);
+}
+
 function onPointerDown(event) {
   if (state.pointer.pointerId !== null) {
     return;
   }
   updateTargetIndicator(event.global.x, event.global.y);
   state.pointer.pointerId = event.pointerId;
-  state.pointer.button = event.button;
+  state.pointer.button = typeof event.button === "number" ? event.button : 0;
+  state.pointer.pointerType = event.pointerType ?? event.data?.pointerType ?? "mouse";
   state.pointer.startX = event.global.x;
   state.pointer.startY = event.global.y;
   state.pointer.lastX = event.global.x;
   state.pointer.lastY = event.global.y;
   state.pointer.dragging = false;
+  state.pointer.longPressTriggered = false;
+  scheduleLongPress(event);
 }
 
 function onPointerMove(event) {
@@ -1309,6 +1367,7 @@ function onPointerMove(event) {
     (global.y - state.pointer.startY) ** 2;
   if (!state.pointer.dragging && distanceSq > 16) {
     state.pointer.dragging = true;
+    cancelLongPressTimer();
   }
 
   if (state.pointer.dragging) {
@@ -1327,6 +1386,7 @@ function finishPointer(event) {
     return;
   }
 
+  cancelLongPressTimer();
   const { button } = state.pointer;
   const globalX = event.global.x;
   const globalY = event.global.y;
@@ -1336,6 +1396,11 @@ function finishPointer(event) {
   state.pointer.dragging = false;
 
   updateTargetIndicator(globalX, globalY);
+
+  if (state.pointer.longPressTriggered) {
+    state.pointer.longPressTriggered = false;
+    return;
+  }
 
   if (button === 0 && !wasDragging) {
     const { cx, cy } = screenToCell(globalX, globalY);
@@ -1350,6 +1415,7 @@ interactionLayer.on("pointerdown", onPointerDown);
 interactionLayer.on("pointermove", onPointerMove);
 interactionLayer.on("pointerup", finishPointer);
 interactionLayer.on("pointerupoutside", finishPointer);
+interactionLayer.on("pointercancel", finishPointer);
 interactionLayer.on("pointerout", hideTargetIndicator);
 interactionLayer.on("rightdown", (event) => {
   event.preventDefault();
@@ -1414,24 +1480,31 @@ window.addEventListener("keydown", (event) => {
 
 const savedGame = loadSavedGame();
 if (savedGame) {
-  const seedToUse =
-    typeof savedGame.seed === "string" && savedGame.seed.trim().length > 0
-      ? savedGame.seed.trim()
-      : state.seed;
-  const densityToUse =
-    typeof savedGame.mineDensity === "number" && Number.isFinite(savedGame.mineDensity)
-      ? savedGame.mineDensity
-      : state.mineDensity;
+  try {
+    const seedToUse =
+      typeof savedGame.seed === "string" && savedGame.seed.trim().length > 0
+        ? savedGame.seed.trim()
+        : state.seed;
+    const densityToUse =
+      typeof savedGame.mineDensity === "number" && Number.isFinite(savedGame.mineDensity)
+        ? savedGame.mineDensity
+        : state.mineDensity;
 
-  state.restoring = true;
-  resetGame({
-    newSeed: seedToUse,
-    newDensity: densityToUse,
-    preserveView: true,
-    skipSaveClear: true,
-  });
-  state.restoring = false;
-  applySavedGame(savedGame);
+    state.restoring = true;
+    resetGame({
+      newSeed: seedToUse,
+      newDensity: densityToUse,
+      preserveView: true,
+      skipSaveClear: true,
+    });
+    state.restoring = false;
+    applySavedGame(savedGame);
+  } catch (error) {
+    state.restoring = false;
+    console.warn("Failed to restore saved game. Clearing corrupted snapshot.", error);
+    clearSavedGame();
+    resetGame({ preserveView: false });
+  }
 } else {
   resetGame({ preserveView: false });
 }
