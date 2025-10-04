@@ -134,3 +134,51 @@ kbd {
   border: 1px solid rgba(148, 163, 184, 0.4);
   font-size: 0.75rem;
 }
+
+.target-indicator {
+  position: fixed;
+  left: 1.25rem;
+  bottom: 1.25rem;
+  min-width: 220px;
+  padding: 0.4rem 0.7rem;
+  border-radius: 0.55rem;
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.25);
+  font-size: 0.85rem;
+  color: rgba(226, 232, 240, 0.85);
+  letter-spacing: 0.01em;
+  z-index: 12;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.target-indicator.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.action-warning {
+  position: fixed;
+  left: 50%;
+  bottom: 2.5rem;
+  transform: translate(-50%, 20px);
+  padding: 0.55rem 1.1rem;
+  border-radius: 0.65rem;
+  background: rgba(248, 113, 113, 0.9);
+  color: #0f172a;
+  font-weight: 600;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  box-shadow: 0 16px 36px rgba(248, 113, 113, 0.3);
+  z-index: 15;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.action-warning.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
