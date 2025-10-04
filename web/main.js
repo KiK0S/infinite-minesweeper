@@ -1,10 +1,10 @@
 import * as PIXI from "https://cdn.jsdelivr.net/npm/pixi.js@7.3.3/dist/pixi.mjs";
 
-const CELL_SIZE = 48;
+const CELL_SIZE = 24;
 const CHUNK_SIZE = 8;
 const BLOCK_SIZE = 30;
 const MIN_SCALE = 0.35;
-const MAX_SCALE = 2.8;
+const MAX_SCALE = 3.2;
 const GROUPING_THRESHOLD = 0.65;
 const BACKGROUND_COLOR = 0x0f172a;
 const REVEALED_COLOR = 0x1e293b;
@@ -24,25 +24,25 @@ const NUMBER_COLORS = {
 const styles = {
   flag: new PIXI.TextStyle({
     fill: "#fb7185",
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: "700",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
   }),
   mine: new PIXI.TextStyle({
     fill: "#facc15",
-    fontSize: 26,
+    fontSize: 20,
     fontWeight: "700",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
   }),
   empty: new PIXI.TextStyle({
     fill: "#f8fafc",
-    fontSize: 20,
+    fontSize: 15,
     fontWeight: "600",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
   }),
   lock: new PIXI.TextStyle({
     fill: "#facc15",
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: "600",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
   }),
@@ -55,7 +55,7 @@ function styleForNumber(value) {
       value,
       new PIXI.TextStyle({
         fill: NUMBER_COLORS[value] ?? "#e2e8f0",
-        fontSize: 24,
+        fontSize: 18,
         fontWeight: "700",
         fontFamily: "Inter, 'Segoe UI', sans-serif",
       })
@@ -109,6 +109,9 @@ interactionLayer.cursor = "pointer";
 board.addChild(interactionLayer);
 
 const hud = {
+  shell: document.getElementById("hud-shell"),
+  panel: document.getElementById("hud"),
+  toggleButton: document.getElementById("hud-toggle"),
   seedInput: document.getElementById("seed"),
   randomSeedButton: document.getElementById("random-seed"),
   resetButton: document.getElementById("reset"),
@@ -139,17 +142,25 @@ const state = {
   scale: 1,
   pointer: {
     pointerId: null,
+    secondaryId: null,
     button: 0,
     pointerType: "mouse",
     startX: 0,
     startY: 0,
     lastX: 0,
     lastY: 0,
+    secondLastX: 0,
+    secondLastY: 0,
     startCellX: 0,
     startCellY: 0,
     dragging: false,
     longPressTimeout: null,
     longPressTriggered: false,
+    pinchStartDistance: 0,
+    pinchStartScale: 1,
+    pinchCenterX: 0,
+    pinchCenterY: 0,
+    pinchActive: false,
   },
   needsRender: true,
   revealedSafe: 0,
@@ -157,6 +168,7 @@ const state = {
   startRegionGenerated: false,
   startRegionOrigin: null,
   restoring: false,
+  hudCollapsed: false,
 };
 
 const mineCache = new Map();
@@ -172,6 +184,27 @@ const chunkStyles = {
   interesting: { fill: 0x38bdf8, alpha: 0.24, border: 0x7dd3fc, borderAlpha: 0.45 },
   danger: { fill: EXPLODED_COLOR, alpha: 0.35, border: 0xf87171, borderAlpha: 0.6 },
 };
+
+function setHudCollapsed(collapsed) {
+  state.hudCollapsed = collapsed;
+  if (hud.shell) {
+    hud.shell.classList.toggle("is-collapsed", collapsed);
+  }
+  if (hud.panel) {
+    hud.panel.setAttribute("aria-hidden", collapsed.toString());
+  }
+  if (hud.toggleButton) {
+    const label = collapsed ? "Show controls" : "Hide controls";
+    hud.toggleButton.setAttribute("aria-expanded", (!collapsed).toString());
+    hud.toggleButton.setAttribute("aria-label", label);
+    const hiddenLabel = hud.toggleButton.querySelector(".visually-hidden");
+    if (hiddenLabel) {
+      hiddenLabel.textContent = label;
+    }
+  }
+}
+
+setHudCollapsed(state.hudCollapsed);
 
 function cellKey(x, y) {
   return `${x},${y}`;
@@ -533,6 +566,25 @@ function clearBoardGraphics() {
   chunkLayer.removeChildren();
 }
 
+function hasActiveProgress() {
+  if (state.revealedSafe > 0 || state.exploded) {
+    return true;
+  }
+  for (const cell of cellStates.values()) {
+    if (cell.flagged) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function confirmReset() {
+  if (!hasActiveProgress()) {
+    return true;
+  }
+  return window.confirm("Reset the current seed? Revealed tiles and flags will be cleared.");
+}
+
 function resetGame({ newSeed, newDensity, preserveView = false, skipSaveClear = false } = {}) {
   if (!skipSaveClear) {
     clearSavedGame();
@@ -723,6 +775,7 @@ function saveGame() {
       mineDensity: state.mineDensity,
       scale: state.scale,
       boardPosition: { x: board.position.x, y: board.position.y },
+      hudCollapsed: state.hudCollapsed,
       revealed,
       flagged,
       forcedSafe: Array.from(forcedSafeCells),
@@ -779,6 +832,8 @@ function applySavedGame(data) {
     ) {
       board.position.set(data.boardPosition.x, data.boardPosition.y);
     }
+
+    setHudCollapsed(Boolean(data.hudCollapsed));
 
     state.startRegionGenerated = Boolean(data.startRegionGenerated) || forcedSafeCells.size > 0;
     if (
@@ -1292,6 +1347,55 @@ function revealNeighborsOfNumber(x, y) {
   return changed;
 }
 
+function resetPinchTracking() {
+  state.pointer.pinchActive = false;
+  state.pointer.pinchStartDistance = 0;
+  state.pointer.pinchCenterX = 0;
+  state.pointer.pinchCenterY = 0;
+  state.pointer.pinchStartScale = state.scale;
+}
+
+function applyPinchGesture() {
+  if (!state.pointer.pinchActive || state.pointer.secondaryId === null) {
+    return;
+  }
+
+  const primaryX = state.pointer.lastX;
+  const primaryY = state.pointer.lastY;
+  const secondaryX = state.pointer.secondLastX;
+  const secondaryY = state.pointer.secondLastY;
+
+  const centerX = (primaryX + secondaryX) / 2;
+  const centerY = (primaryY + secondaryY) / 2;
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+    return;
+  }
+
+  const previousCenterX = state.pointer.pinchCenterX;
+  const previousCenterY = state.pointer.pinchCenterY;
+  if (Number.isFinite(previousCenterX) && Number.isFinite(previousCenterY)) {
+    board.position.x += centerX - previousCenterX;
+    board.position.y += centerY - previousCenterY;
+  }
+
+  const distance = Math.hypot(secondaryX - primaryX, secondaryY - primaryY);
+  if (distance > 0 && state.pointer.pinchStartDistance > 0) {
+    const scaleFactor = distance / state.pointer.pinchStartDistance;
+    const newScale = clamp(state.pointer.pinchStartScale * scaleFactor, MIN_SCALE, MAX_SCALE);
+    const worldCenter = screenToWorld(centerX, centerY);
+    state.scale = newScale;
+    board.scale.set(newScale);
+    board.position.set(centerX - worldCenter.x * newScale, centerY - worldCenter.y * newScale);
+  }
+
+  state.pointer.pinchCenterX = centerX;
+  state.pointer.pinchCenterY = centerY;
+  state.pointer.pinchStartDistance = distance > 0 ? distance : state.pointer.pinchStartDistance;
+  state.pointer.pinchStartScale = state.scale;
+  state.needsRender = true;
+  scheduleSave();
+}
+
 function handleWheel(event) {
   event.preventDefault();
   const { offsetX, offsetY, deltaY } = event;
@@ -1331,36 +1435,87 @@ function scheduleLongPress(event) {
 }
 
 function onPointerDown(event) {
-  if (state.pointer.pointerId !== null) {
+  const pointerId = event.pointerId;
+  if (state.pointer.pointerId === null) {
+    state.pointer.pointerId = pointerId;
+    state.pointer.button = typeof event.button === "number" ? event.button : 0;
+    state.pointer.pointerType = event.pointerType ?? event.data?.pointerType ?? "mouse";
+    state.pointer.startX = event.global.x;
+    state.pointer.startY = event.global.y;
+    state.pointer.lastX = event.global.x;
+    state.pointer.lastY = event.global.y;
+    state.pointer.secondLastX = event.global.x;
+    state.pointer.secondLastY = event.global.y;
+    state.pointer.dragging = false;
+    state.pointer.longPressTriggered = false;
+    state.pointer.secondaryId = null;
+    resetPinchTracking();
+    state.pointer.pinchCenterX = event.global.x;
+    state.pointer.pinchCenterY = event.global.y;
+    updateTargetIndicator(event.global.x, event.global.y);
+    scheduleLongPress(event);
     return;
   }
-  updateTargetIndicator(event.global.x, event.global.y);
-  state.pointer.pointerId = event.pointerId;
-  state.pointer.button = typeof event.button === "number" ? event.button : 0;
-  state.pointer.pointerType = event.pointerType ?? event.data?.pointerType ?? "mouse";
-  state.pointer.startX = event.global.x;
-  state.pointer.startY = event.global.y;
-  state.pointer.lastX = event.global.x;
-  state.pointer.lastY = event.global.y;
-  state.pointer.dragging = false;
-  state.pointer.longPressTriggered = false;
-  scheduleLongPress(event);
+
+  if (state.pointer.secondaryId === null && pointerId !== state.pointer.pointerId) {
+    state.pointer.secondaryId = pointerId;
+    state.pointer.secondLastX = event.global.x;
+    state.pointer.secondLastY = event.global.y;
+    state.pointer.startX = state.pointer.lastX;
+    state.pointer.startY = state.pointer.lastY;
+    state.pointer.pinchStartDistance = Math.hypot(
+      state.pointer.secondLastX - state.pointer.lastX,
+      state.pointer.secondLastY - state.pointer.lastY
+    );
+    state.pointer.pinchStartScale = state.scale;
+    state.pointer.pinchCenterX = (state.pointer.lastX + state.pointer.secondLastX) / 2;
+    state.pointer.pinchCenterY = (state.pointer.lastY + state.pointer.secondLastY) / 2;
+    state.pointer.pinchActive = true;
+    state.pointer.dragging = false;
+    state.pointer.longPressTriggered = false;
+    cancelLongPressTimer();
+    hideTargetIndicator();
+  }
 }
 
 function onPointerMove(event) {
-  updateTargetIndicator(event.global.x, event.global.y);
-  if (state.pointer.pointerId !== event.pointerId) {
+  const pointerId = event.pointerId;
+  const isPrimary = pointerId === state.pointer.pointerId;
+  const isSecondary = pointerId === state.pointer.secondaryId;
+
+  if (!isPrimary && !isSecondary) {
     return;
   }
+
   const { global } = event;
-  const dx = global.x - state.pointer.lastX;
-  const dy = global.y - state.pointer.lastY;
+
+  if (isSecondary) {
+    state.pointer.secondLastX = global.x;
+    state.pointer.secondLastY = global.y;
+    hideTargetIndicator();
+    if (state.pointer.pinchActive) {
+      applyPinchGesture();
+    }
+    return;
+  }
+
+  const previousX = state.pointer.lastX;
+  const previousY = state.pointer.lastY;
+  state.pointer.lastX = global.x;
+  state.pointer.lastY = global.y;
+
+  if (state.pointer.secondaryId !== null && state.pointer.pinchActive) {
+    hideTargetIndicator();
+    applyPinchGesture();
+    return;
+  }
 
   if (state.pointer.button !== 0 && state.pointer.button !== 1) {
-    state.pointer.lastX = global.x;
-    state.pointer.lastY = global.y;
     return;
   }
+
+  const dx = global.x - previousX;
+  const dy = global.y - previousY;
 
   const distanceSq =
     (global.x - state.pointer.startX) ** 2 +
@@ -1368,6 +1523,7 @@ function onPointerMove(event) {
   if (!state.pointer.dragging && distanceSq > 16) {
     state.pointer.dragging = true;
     cancelLongPressTimer();
+    hideTargetIndicator();
   }
 
   if (state.pointer.dragging) {
@@ -1375,37 +1531,72 @@ function onPointerMove(event) {
     board.position.y += dy;
     state.needsRender = true;
     scheduleSave();
+    hideTargetIndicator();
+  } else {
+    updateTargetIndicator(global.x, global.y);
   }
-
-  state.pointer.lastX = global.x;
-  state.pointer.lastY = global.y;
 }
 
 function finishPointer(event) {
-  if (state.pointer.pointerId !== event.pointerId) {
+  const pointerId = event.pointerId;
+  const isPrimary = pointerId === state.pointer.pointerId;
+  const isSecondary = pointerId === state.pointer.secondaryId;
+
+  if (!isPrimary && !isSecondary) {
     return;
   }
 
   cancelLongPressTimer();
+
+  if (isSecondary) {
+    state.pointer.secondaryId = null;
+    resetPinchTracking();
+    return;
+  }
+
   const { button } = state.pointer;
   const globalX = event.global.x;
   const globalY = event.global.y;
   const wasDragging = state.pointer.dragging;
 
-  state.pointer.pointerId = null;
-  state.pointer.dragging = false;
-
-  updateTargetIndicator(globalX, globalY);
-
-  if (state.pointer.longPressTriggered) {
+  if (state.pointer.secondaryId !== null) {
+    state.pointer.pointerId = state.pointer.secondaryId;
+    state.pointer.secondaryId = null;
+    state.pointer.lastX = state.pointer.secondLastX;
+    state.pointer.lastY = state.pointer.secondLastY;
+    state.pointer.startX = state.pointer.lastX;
+    state.pointer.startY = state.pointer.lastY;
+    state.pointer.button = 0;
+    state.pointer.pointerType = "touch";
+    state.pointer.dragging = true;
     state.pointer.longPressTriggered = false;
+    resetPinchTracking();
+    hideTargetIndicator();
     return;
   }
 
-  if (button === 0 && !wasDragging) {
+  state.pointer.pointerId = null;
+  state.pointer.dragging = false;
+
+  if (state.pointer.longPressTriggered) {
+    state.pointer.longPressTriggered = false;
+    resetPinchTracking();
+    return;
+  }
+
+  resetPinchTracking();
+
+  if (wasDragging) {
+    hideTargetIndicator();
+    return;
+  }
+
+  updateTargetIndicator(globalX, globalY);
+
+  if (button === 0) {
     const { cx, cy } = screenToCell(globalX, globalY);
     revealCell(cx, cy);
-  } else if (button === 2 && !wasDragging) {
+  } else if (button === 2) {
     const { cx, cy } = screenToCell(globalX, globalY);
     toggleFlag(cx, cy);
   }
@@ -1434,6 +1625,13 @@ app.ticker.add(() => {
 window.addEventListener("resize", () => {
   state.needsRender = true;
 });
+
+if (hud.toggleButton) {
+  hud.toggleButton.addEventListener("click", () => {
+    setHudCollapsed(!state.hudCollapsed);
+    scheduleSave();
+  });
+}
 
 hud.randomSeedButton.addEventListener("click", () => {
   resetGame({ newSeed: randomSeedString() });
@@ -1473,7 +1671,30 @@ hud.densityInput.addEventListener("change", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (event.key.toLowerCase() === "r") {
+  if (event.defaultPrevented) {
+    return;
+  }
+  if (event.key.toLowerCase() !== "r") {
+    return;
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return;
+  }
+  if (event.repeat) {
+    return;
+  }
+
+  const target = event.target;
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target && target.isContentEditable)
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  if (confirmReset()) {
     resetGame({ preserveView: false });
   }
 });

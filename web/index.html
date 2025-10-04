@@ -7,29 +7,41 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div class="hud" id="hud">
-      <div class="hud__header">
-        <h1>Infinite Minesweeper</h1>
-        <button id="reset">Reset</button>
+    <div class="hud-shell" id="hud-shell">
+      <div class="hud" id="hud">
+        <div class="hud__header">
+          <h1>Infinite Minesweeper</h1>
+          <button id="reset">Reset</button>
+        </div>
+        <div class="hud__controls">
+          <label>
+            Seed
+            <input id="seed" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <button id="random-seed">Random</button>
+        </div>
+        <div class="hud__controls">
+          <label class="slider">
+            Mine density
+            <input id="density" type="range" min="0.05" max="0.35" step="0.01" value="0.18" />
+            <span id="density-value">18%</span>
+          </label>
+        </div>
+        <p class="hud__hint">
+          Left click or tap to reveal. Right click or long-press to flag. Drag to pan, scroll or pinch to zoom. Press <kbd>R</kbd> to reset the current seed.
+        </p>
+        <p class="hud__status" id="status"></p>
       </div>
-      <div class="hud__controls">
-        <label>
-          Seed
-          <input id="seed" type="text" autocomplete="off" spellcheck="false" />
-        </label>
-        <button id="random-seed">Random</button>
-      </div>
-      <div class="hud__controls">
-        <label class="slider">
-          Mine density
-          <input id="density" type="range" min="0.05" max="0.35" step="0.01" value="0.18" />
-          <span id="density-value">18%</span>
-        </label>
-      </div>
-      <p class="hud__hint">
-        Left click or tap to reveal. Right click or long-press to flag. Drag to pan, scroll to zoom. Press <kbd>R</kbd> to reset the current seed.
-      </p>
-      <p class="hud__status" id="status"></p>
+      <button
+        class="hud-toggle"
+        id="hud-toggle"
+        type="button"
+        aria-controls="hud"
+        aria-expanded="true"
+      >
+        <span class="hud-toggle__icon" aria-hidden="true">➤</span>
+        <span class="visually-hidden">Hide controls</span>
+      </button>
     </div>
     <div class="target-indicator" id="target-indicator" aria-live="polite"></div>
     <div class="action-warning" id="action-warning" aria-live="assertive"></div>
