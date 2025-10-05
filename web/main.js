@@ -136,8 +136,12 @@ const overlays = {
   actionWarning: document.getElementById("action-warning"),
 };
 
-const STORAGE_KEY = "infinite-minesweeper-save-v2";
+const STORAGE_KEY = "infinite-minesweeper-save-v3";
+const LEGACY_STORAGE_KEYS = ["infinite-minesweeper-save-v2"];
 const SAVE_DEBOUNCE = 250;
+const SAVE_INTERVAL = 60_000;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 const START_REGION_SIZE = 30;
 const LONG_PRESS_DURATION = 450;
 
@@ -145,6 +149,7 @@ const forcedSafeCells = new Set();
 let warningTimeoutId = null;
 let pendingSaveId = null;
 let lastSavedSnapshot = "";
+let lastSaveTime = 0;
 
 const state = {
   seed: randomSeedString(),
@@ -305,7 +310,7 @@ function blockSafeCellsLeft(block) {
 }
 
 function registerRevealedCell(x, y) {
-  const cell = getCellState(x, y);
+  const cell = ensureCellDetails(getCellState(x, y));
   if (cell.mine || cell.blockCounted) {
     return;
   }
@@ -326,7 +331,7 @@ function handleBlockCompletion(block) {
   block.locked = false;
   refreshBlockGraphics(block.bx, block.by);
   state.needsRender = true;
-  scheduleSave();
+  scheduleSave({ immediate: true });
 
   const visited = new Set();
   unlockRegionIfPossible(block.bx, block.by, visited);
@@ -421,7 +426,7 @@ function isCellLocked(x, y) {
 function autoCompleteBlock(block) {
   let changed = false;
   forEachCellInBlock(block.bx, block.by, (x, y) => {
-    const cell = getCellState(x, y);
+    const cell = ensureCellDetails(getCellState(x, y));
     if (!cell.mine && !cell.revealed) {
       cell.revealed = true;
       state.revealedSafe += 1;
@@ -526,26 +531,39 @@ function mineAt(x, y) {
 function getCellState(x, y) {
   const key = cellKey(x, y);
   if (!cellStates.has(key)) {
-    const mine = mineAt(x, y);
-    let adjacent = 0;
-    if (!mine) {
-      for (const [dx, dy] of neighborOffsets) {
-        if (mineAt(x + dx, y + dy)) {
-          adjacent += 1;
-        }
-      }
-    }
     cellStates.set(key, {
       x,
       y,
-      mine,
-      adjacent,
+      mine: undefined,
+      adjacent: 0,
       revealed: false,
       flagged: false,
       blockCounted: false,
+      detailsComputed: false,
     });
   }
   return cellStates.get(key);
+}
+
+function ensureCellDetails(cell) {
+  if (!cell || cell.detailsComputed) {
+    return cell;
+  }
+  const mine = mineAt(cell.x, cell.y);
+  cell.mine = mine;
+  if (!mine) {
+    let adjacent = 0;
+    for (const [dx, dy] of neighborOffsets) {
+      if (mineAt(cell.x + dx, cell.y + dy)) {
+        adjacent += 1;
+      }
+    }
+    cell.adjacent = adjacent;
+  } else {
+    cell.adjacent = 0;
+  }
+  cell.detailsComputed = true;
+  return cell;
 }
 
 function screenToWorld(screenX, screenY) {
@@ -734,36 +752,104 @@ function cancelPendingSave() {
 function clearSavedGame() {
   try {
     localStorage.removeItem(STORAGE_KEY);
+    for (const key of LEGACY_STORAGE_KEYS) {
+      localStorage.removeItem(key);
+    }
     lastSavedSnapshot = "";
+    lastSaveTime = 0;
   } catch (error) {
     console.warn("Failed to clear saved game", error);
   }
 }
 
 function loadSavedGame() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return null;
+  const keys = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
+  for (const key of keys) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) {
+        continue;
+      }
+      const trimmed = raw.trim();
+      let data = null;
+      if (trimmed.startsWith("{")) {
+        data = JSON.parse(trimmed);
+      } else {
+        data = decodeSaveData(trimmed);
+      }
+      if (data) {
+        if (key !== STORAGE_KEY) {
+          try {
+            localStorage.removeItem(key);
+          } catch (error) {
+            console.warn("Failed to remove legacy save", error);
+          }
+        }
+        return data;
+      }
+    } catch (error) {
+      console.warn("Failed to load saved game", error);
     }
-    return JSON.parse(raw);
-  } catch (error) {
-    console.warn("Failed to load saved game", error);
-    return null;
   }
+  return null;
 }
 
-function scheduleSave() {
+function scheduleSave(options = {}) {
   if (state.restoring) {
     return;
   }
-  if (pendingSaveId !== null) {
-    clearTimeout(pendingSaveId);
+  const immediate = Boolean(options.immediate);
+  if (immediate) {
+    cancelPendingSave();
+    saveGame();
+    return;
   }
+  if (pendingSaveId !== null) {
+    return;
+  }
+  const now = Date.now();
+  const elapsed = now - lastSaveTime;
+  const wait = elapsed >= SAVE_INTERVAL ? SAVE_DEBOUNCE : Math.max(0, SAVE_INTERVAL - elapsed);
   pendingSaveId = window.setTimeout(() => {
     pendingSaveId = null;
     saveGame();
-  }, SAVE_DEBOUNCE);
+  }, wait);
+}
+
+function collectSaveData() {
+  const revealed = [];
+  const flagged = [];
+  for (const cell of cellStates.values()) {
+    if (cell.revealed) {
+      revealed.push([cell.x, cell.y]);
+    }
+    if (cell.flagged) {
+      flagged.push([cell.x, cell.y]);
+    }
+  }
+
+  const lockedBlocks = [];
+  for (const block of blockStates.values()) {
+    if (block.locked && !block.completed) {
+      lockedBlocks.push([block.bx, block.by]);
+    }
+  }
+
+  return {
+    seed: state.seed,
+    mineDensity: state.mineDensity,
+    scale: state.scale,
+    boardPosition: { x: board.position.x, y: board.position.y },
+    hudCollapsed: state.hudCollapsed,
+    revealed,
+    flagged,
+    forcedSafe: Array.from(forcedSafeCells),
+    startRegionGenerated: state.startRegionGenerated,
+    startRegionOrigin: state.startRegionOrigin,
+    revealedSafe: state.revealedSafe,
+    exploded: state.exploded,
+    lockedBlocks,
+  };
 }
 
 function saveGame() {
@@ -771,44 +857,359 @@ function saveGame() {
     return;
   }
   try {
-    const revealed = [];
-    const flagged = [];
-    for (const cell of cellStates.values()) {
-      if (cell.revealed) {
-        revealed.push([cell.x, cell.y]);
-      } else if (cell.flagged) {
-        flagged.push([cell.x, cell.y]);
-      }
+    const data = collectSaveData();
+    const snapshot = encodeSaveData(data);
+    if (!snapshot) {
+      return;
     }
-
-    const data = {
-      seed: state.seed,
-      mineDensity: state.mineDensity,
-      scale: state.scale,
-      boardPosition: { x: board.position.x, y: board.position.y },
-      hudCollapsed: state.hudCollapsed,
-      revealed,
-      flagged,
-      forcedSafe: Array.from(forcedSafeCells),
-      startRegionGenerated: state.startRegionGenerated,
-      startRegionOrigin: state.startRegionOrigin,
-      revealedSafe: state.revealedSafe,
-      exploded: state.exploded,
-      timestamp: Date.now(),
-      lockedBlocks: Array.from(blockStates.values())
-        .filter((block) => block.locked && !block.completed)
-        .map((block) => [block.bx, block.by]),
-    };
-
-    const snapshot = JSON.stringify(data);
     if (snapshot === lastSavedSnapshot) {
+      lastSaveTime = Date.now();
       return;
     }
     localStorage.setItem(STORAGE_KEY, snapshot);
     lastSavedSnapshot = snapshot;
+    lastSaveTime = Date.now();
   } catch (error) {
     console.warn("Failed to save game", error);
   }
+}
+
+function encodeSaveData(data) {
+  try {
+    const seed = typeof data.seed === "string" ? data.seed : "";
+    const seedBytes = textEncoder.encode(seed);
+
+    const mineDensity = Number.isFinite(data.mineDensity) ? data.mineDensity : 0;
+    const scale = Number.isFinite(data.scale) ? data.scale : 1;
+    const boardPosition = data.boardPosition ?? { x: 0, y: 0 };
+    const boardX = Number.isFinite(boardPosition.x) ? boardPosition.x : 0;
+    const boardY = Number.isFinite(boardPosition.y) ? boardPosition.y : 0;
+    const hudCollapsed = Boolean(data.hudCollapsed);
+    const startRegionGenerated = Boolean(data.startRegionGenerated);
+    const startRegionOrigin =
+      data.startRegionOrigin &&
+      Number.isFinite(data.startRegionOrigin.x) &&
+      Number.isFinite(data.startRegionOrigin.y)
+        ? {
+            x: Math.trunc(data.startRegionOrigin.x),
+            y: Math.trunc(data.startRegionOrigin.y),
+          }
+        : null;
+    const revealedSafe = Number.isFinite(data.revealedSafe)
+      ? Math.max(0, Math.trunc(data.revealedSafe))
+      : 0;
+    const exploded = Boolean(data.exploded);
+
+    const lockedBlocks = Array.isArray(data.lockedBlocks) ? data.lockedBlocks : [];
+    const normalizedLockedBlocks = [];
+    for (const entry of lockedBlocks) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const bx = Math.trunc(entry[0]);
+      const by = Math.trunc(entry[1]);
+      normalizedLockedBlocks.push({ bx, by });
+    }
+    normalizedLockedBlocks.sort((a, b) => a.bx - b.bx || a.by - b.by);
+
+    const forcedSafeKeys = Array.isArray(data.forcedSafe) ? data.forcedSafe : [];
+    const normalizedForcedSafe = [];
+    for (const key of forcedSafeKeys) {
+      if (typeof key !== "string") {
+        continue;
+      }
+      const parsed = parseCellKey(key);
+      if (!Number.isFinite(parsed.x) || !Number.isFinite(parsed.y)) {
+        continue;
+      }
+      normalizedForcedSafe.push({ x: Math.trunc(parsed.x), y: Math.trunc(parsed.y) });
+    }
+    normalizedForcedSafe.sort((a, b) => a.x - b.x || a.y - b.y);
+
+    const cellsMap = new Map();
+    const revealedList = Array.isArray(data.revealed) ? data.revealed : [];
+    for (const entry of revealedList) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const x = Math.trunc(entry[0]);
+      const y = Math.trunc(entry[1]);
+      const key = cellKey(x, y);
+      const existing = cellsMap.get(key) ?? { x, y, flags: 0 };
+      existing.flags |= 1;
+      cellsMap.set(key, existing);
+    }
+    const flaggedList = Array.isArray(data.flagged) ? data.flagged : [];
+    for (const entry of flaggedList) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const x = Math.trunc(entry[0]);
+      const y = Math.trunc(entry[1]);
+      const key = cellKey(x, y);
+      const existing = cellsMap.get(key) ?? { x, y, flags: 0 };
+      existing.flags |= 2;
+      cellsMap.set(key, existing);
+    }
+    const cells = Array.from(cellsMap.values());
+    cells.sort((a, b) => a.x - b.x || a.y - b.y);
+
+    let totalSize = 4; // Header
+    totalSize += 2 + seedBytes.length;
+    totalSize += 4 * 4; // mineDensity, scale, boardX, boardY
+    totalSize += 1; // hudCollapsed
+    totalSize += 1; // startRegionGenerated
+    totalSize += 1; // startRegionOrigin present flag
+    if (startRegionOrigin) {
+      totalSize += 8;
+    }
+    totalSize += 4; // revealedSafe
+    totalSize += 1; // exploded
+    totalSize += 4 + normalizedLockedBlocks.length * 8;
+    totalSize += 4 + normalizedForcedSafe.length * 8;
+    totalSize += 4 + cells.length * 9;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+    let offset = 0;
+
+    bytes[offset++] = 0x49; // I
+    bytes[offset++] = 0x4d; // M
+    bytes[offset++] = 0x53; // S
+    bytes[offset++] = 0x01; // version 1
+
+    view.setUint16(offset, seedBytes.length, true);
+    offset += 2;
+    bytes.set(seedBytes, offset);
+    offset += seedBytes.length;
+
+    view.setFloat32(offset, mineDensity, true);
+    offset += 4;
+    view.setFloat32(offset, scale, true);
+    offset += 4;
+    view.setFloat32(offset, boardX, true);
+    offset += 4;
+    view.setFloat32(offset, boardY, true);
+    offset += 4;
+
+    view.setUint8(offset, hudCollapsed ? 1 : 0);
+    offset += 1;
+    view.setUint8(offset, startRegionGenerated ? 1 : 0);
+    offset += 1;
+    view.setUint8(offset, startRegionOrigin ? 1 : 0);
+    offset += 1;
+    if (startRegionOrigin) {
+      view.setInt32(offset, startRegionOrigin.x, true);
+      offset += 4;
+      view.setInt32(offset, startRegionOrigin.y, true);
+      offset += 4;
+    }
+
+    view.setUint32(offset, revealedSafe, true);
+    offset += 4;
+    view.setUint8(offset, exploded ? 1 : 0);
+    offset += 1;
+
+    view.setUint32(offset, normalizedLockedBlocks.length, true);
+    offset += 4;
+    for (const block of normalizedLockedBlocks) {
+      view.setInt32(offset, block.bx, true);
+      offset += 4;
+      view.setInt32(offset, block.by, true);
+      offset += 4;
+    }
+
+    view.setUint32(offset, normalizedForcedSafe.length, true);
+    offset += 4;
+    for (const cell of normalizedForcedSafe) {
+      view.setInt32(offset, cell.x, true);
+      offset += 4;
+      view.setInt32(offset, cell.y, true);
+      offset += 4;
+    }
+
+    view.setUint32(offset, cells.length, true);
+    offset += 4;
+    for (const cell of cells) {
+      view.setInt32(offset, cell.x, true);
+      offset += 4;
+      view.setInt32(offset, cell.y, true);
+      offset += 4;
+      view.setUint8(offset, cell.flags & 0xff);
+      offset += 1;
+    }
+
+    return base64FromBytes(bytes);
+  } catch (error) {
+    console.warn("Failed to encode save data", error);
+    return null;
+  }
+}
+
+function decodeSaveData(base64) {
+  try {
+    const bytes = bytesFromBase64(base64);
+    if (bytes.length < 4) {
+      return null;
+    }
+    if (bytes[0] !== 0x49 || bytes[1] !== 0x4d || bytes[2] !== 0x53) {
+      return null;
+    }
+    const version = bytes[3];
+    if (version !== 0x01) {
+      return null;
+    }
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 4;
+
+    if (offset + 2 > view.byteLength) {
+      return null;
+    }
+    const seedLength = view.getUint16(offset, true);
+    offset += 2;
+    if (offset + seedLength > view.byteLength) {
+      return null;
+    }
+    const seed = textDecoder.decode(bytes.subarray(offset, offset + seedLength));
+    offset += seedLength;
+
+    if (offset + 4 * 4 + 3 > view.byteLength) {
+      return null;
+    }
+    const mineDensity = view.getFloat32(offset, true);
+    offset += 4;
+    const scale = view.getFloat32(offset, true);
+    offset += 4;
+    const boardX = view.getFloat32(offset, true);
+    offset += 4;
+    const boardY = view.getFloat32(offset, true);
+    offset += 4;
+    const hudCollapsed = view.getUint8(offset) === 1;
+    offset += 1;
+    const startRegionGenerated = view.getUint8(offset) === 1;
+    offset += 1;
+    const hasStartRegionOrigin = view.getUint8(offset) === 1;
+    offset += 1;
+
+    let startRegionOrigin = null;
+    if (hasStartRegionOrigin) {
+      if (offset + 8 > view.byteLength) {
+        return null;
+      }
+      const originX = view.getInt32(offset, true);
+      offset += 4;
+      const originY = view.getInt32(offset, true);
+      offset += 4;
+      startRegionOrigin = { x: originX, y: originY };
+    }
+
+    if (offset + 4 + 1 > view.byteLength) {
+      return null;
+    }
+    const revealedSafe = view.getUint32(offset, true);
+    offset += 4;
+    const exploded = view.getUint8(offset) === 1;
+    offset += 1;
+
+    if (offset + 4 > view.byteLength) {
+      return null;
+    }
+    const lockedCount = view.getUint32(offset, true);
+    offset += 4;
+    const lockedBlocks = [];
+    for (let i = 0; i < lockedCount; i += 1) {
+      if (offset + 8 > view.byteLength) {
+        return null;
+      }
+      const bx = view.getInt32(offset, true);
+      offset += 4;
+      const by = view.getInt32(offset, true);
+      offset += 4;
+      lockedBlocks.push([bx, by]);
+    }
+
+    if (offset + 4 > view.byteLength) {
+      return null;
+    }
+    const forcedCount = view.getUint32(offset, true);
+    offset += 4;
+    const forcedSafe = [];
+    for (let i = 0; i < forcedCount; i += 1) {
+      if (offset + 8 > view.byteLength) {
+        return null;
+      }
+      const x = view.getInt32(offset, true);
+      offset += 4;
+      const y = view.getInt32(offset, true);
+      offset += 4;
+      forcedSafe.push(cellKey(x, y));
+    }
+
+    if (offset + 4 > view.byteLength) {
+      return null;
+    }
+    const cellCount = view.getUint32(offset, true);
+    offset += 4;
+    const revealed = [];
+    const flagged = [];
+    for (let i = 0; i < cellCount; i += 1) {
+      if (offset + 9 > view.byteLength) {
+        return null;
+      }
+      const x = view.getInt32(offset, true);
+      offset += 4;
+      const y = view.getInt32(offset, true);
+      offset += 4;
+      const flags = view.getUint8(offset);
+      offset += 1;
+      if ((flags & 1) === 1) {
+        revealed.push([x, y]);
+      }
+      if ((flags & 2) === 2) {
+        flagged.push([x, y]);
+      }
+    }
+
+    return {
+      seed,
+      mineDensity,
+      scale,
+      boardPosition: { x: boardX, y: boardY },
+      hudCollapsed,
+      startRegionGenerated,
+      startRegionOrigin,
+      revealedSafe,
+      exploded,
+      lockedBlocks,
+      forcedSafe,
+      revealed,
+      flagged,
+    };
+  } catch (error) {
+    console.warn("Failed to decode save data", error);
+    return null;
+  }
+}
+
+function base64FromBytes(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function bytesFromBase64(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 function applySavedGame(data) {
@@ -868,7 +1269,7 @@ function applySavedGame(data) {
         continue;
       }
       const [x, y] = entry;
-      const cell = getCellState(x, y);
+      const cell = ensureCellDetails(getCellState(x, y));
       cell.revealed = true;
       if (!cell.mine) {
         state.revealedSafe += 1;
@@ -911,7 +1312,15 @@ function applySavedGame(data) {
 
     updateStatus();
     state.needsRender = true;
-    lastSavedSnapshot = JSON.stringify(data);
+    const canonical = collectSaveData();
+    const snapshot = encodeSaveData(canonical);
+    if (snapshot) {
+      lastSavedSnapshot = snapshot;
+      lastSaveTime = Date.now();
+    } else {
+      lastSavedSnapshot = "";
+      lastSaveTime = 0;
+    }
   } finally {
     state.restoring = false;
   }
@@ -944,7 +1353,10 @@ function syncCellGraphic(x, y) {
     return;
   }
   const { background, label } = graphic;
-  const stateForCell = cellStates.get(key);
+  let stateForCell = cellStates.get(key);
+  if (stateForCell && stateForCell.revealed && !stateForCell.detailsComputed) {
+    stateForCell = ensureCellDetails(stateForCell);
+  }
   const revealed = stateForCell?.revealed ?? false;
   const flagged = stateForCell?.flagged ?? false;
   const mine = stateForCell?.mine ?? false;
@@ -1198,7 +1610,7 @@ function revealCell(x, y) {
     showWarning("This block is locked. Complete surrounding blocks to unlock it.");
     return false;
   }
-  const start = getCellState(x, y);
+  const start = ensureCellDetails(getCellState(x, y));
   if (start.flagged) {
     return false;
   }
@@ -1229,7 +1641,7 @@ function revealCell(x, y) {
     }
     visited.add(key);
 
-    const cell = getCellState(cx, cy);
+    const cell = ensureCellDetails(getCellState(cx, cy));
     if (cell.revealed || cell.flagged || cell.mine || isCellLocked(cx, cy)) {
       continue;
     }
@@ -1244,7 +1656,7 @@ function revealCell(x, y) {
       for (const [dx, dy] of neighborOffsets) {
         const nx = cx + dx;
         const ny = cy + dy;
-        const neighbor = getCellState(nx, ny);
+        const neighbor = ensureCellDetails(getCellState(nx, ny));
         if (!neighbor.revealed && !neighbor.flagged && !neighbor.mine && !isCellLocked(nx, ny)) {
           stack.push([nx, ny]);
         }
@@ -1255,7 +1667,7 @@ function revealCell(x, y) {
   updateStatus();
   if (anyRevealed) {
     state.needsRender = true;
-    scheduleSave();
+    scheduleSave({ immediate: true });
   }
   return anyRevealed;
 }
@@ -1263,7 +1675,11 @@ function revealCell(x, y) {
 function warnIfOverFlagged(x, y) {
   for (const [dx, dy] of neighborOffsets) {
     const neighbor = cellStates.get(cellKey(x + dx, y + dy));
-    if (!neighbor || !neighbor.revealed || neighbor.adjacent === 0) {
+    if (!neighbor || !neighbor.revealed) {
+      continue;
+    }
+    ensureCellDetails(neighbor);
+    if (neighbor.adjacent === 0) {
       continue;
     }
     let flaggedNeighbors = 0;
@@ -1309,7 +1725,7 @@ function clamp(value, min, max) {
 }
 
 function revealNeighborsOfNumber(x, y) {
-  const center = getCellState(x, y);
+  const center = ensureCellDetails(getCellState(x, y));
   if (!center.revealed || center.adjacent === 0) {
     return false;
   }
