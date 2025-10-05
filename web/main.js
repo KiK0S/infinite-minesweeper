@@ -187,6 +187,103 @@ const state = {
   hudCollapsed: false,
 };
 
+const renderInvalidation = {
+  contentVersion: 0,
+};
+
+const viewState = {
+  lastMode: null,
+  lastMinCellX: null,
+  lastMaxCellX: null,
+  lastMinCellY: null,
+  lastMaxCellY: null,
+  lastContentVersion: -1,
+};
+
+function resetViewTracking() {
+  viewState.lastMode = null;
+  viewState.lastMinCellX = null;
+  viewState.lastMaxCellX = null;
+  viewState.lastMinCellY = null;
+  viewState.lastMaxCellY = null;
+  viewState.lastContentVersion = -1;
+}
+
+resetViewTracking();
+
+function requestRender({ content = false } = {}) {
+  state.needsRender = true;
+  if (content) {
+    renderInvalidation.contentVersion += 1;
+  }
+}
+
+const AudioContextClass =
+  typeof window !== "undefined" ? window.AudioContext || window.webkitAudioContext : null;
+
+const audioState = {
+  context: null,
+  masterGain: null,
+};
+
+function getAudioContext() {
+  if (!AudioContextClass) {
+    return null;
+  }
+  if (!audioState.context) {
+    audioState.context = new AudioContextClass();
+    audioState.masterGain = audioState.context.createGain();
+    audioState.masterGain.gain.value = 0.15;
+    audioState.masterGain.connect(audioState.context.destination);
+  }
+  return audioState.context;
+}
+
+function resumeAudioContext() {
+  const context = getAudioContext();
+  if (context && context.state === "suspended") {
+    context.resume().catch(() => {});
+  }
+}
+
+function playRevealSound(revealedCount = 1) {
+  const context = getAudioContext();
+  if (!context || context.state === "suspended") {
+    return;
+  }
+
+  const now = context.currentTime;
+  const oscillator = context.createOscillator();
+  const envelope = context.createGain();
+  const clampedCount = Math.min(Math.max(revealedCount, 1), 12);
+  const baseFrequency = 420;
+  const frequencyJitter = Math.random() * 60;
+  oscillator.frequency.setValueAtTime(
+    baseFrequency + clampedCount * 25 + frequencyJitter,
+    now
+  );
+  oscillator.type = "triangle";
+
+  envelope.gain.setValueAtTime(0.0001, now);
+  const peakGain = Math.min(0.25, 0.08 + clampedCount * 0.01);
+  envelope.gain.exponentialRampToValueAtTime(peakGain, now + 0.02);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+
+  oscillator.connect(envelope);
+  if (audioState.masterGain) {
+    envelope.connect(audioState.masterGain);
+  } else {
+    envelope.connect(context.destination);
+  }
+
+  oscillator.onended = () => {
+    oscillator.disconnect();
+    envelope.disconnect();
+  };
+  oscillator.start(now);
+  oscillator.stop(now + 0.3);
+}
+
 const mineCache = new Map();
 const cellStates = new Map();
 const cellGraphics = new Map();
@@ -330,7 +427,7 @@ function handleBlockCompletion(block) {
   block.completed = true;
   block.locked = false;
   refreshBlockGraphics(block.bx, block.by);
-  state.needsRender = true;
+  requestRender({ content: true });
   scheduleSave({ immediate: true });
 
   const visited = new Set();
@@ -347,7 +444,7 @@ function lockBlock(bx, by) {
   }
   block.locked = true;
   refreshBlockGraphics(bx, by);
-  state.needsRender = true;
+  requestRender({ content: true });
   scheduleSave();
   return block;
 }
@@ -412,7 +509,7 @@ function unlockRegionIfPossible(startBx, startBy, visited) {
     block.locked = false;
     refreshBlockGraphics(block.bx, block.by);
   }
-  state.needsRender = true;
+  requestRender({ content: true });
   scheduleSave();
   return true;
 }
@@ -438,7 +535,7 @@ function autoCompleteBlock(block) {
 
   if (changed) {
     updateStatus();
-    state.needsRender = true;
+    requestRender({ content: true });
     scheduleSave();
   }
 
@@ -593,6 +690,7 @@ function clearBoardGraphics() {
   }
   chunkGraphics.clear();
   chunkLayer.removeChildren();
+  resetViewTracking();
 }
 
 function hasActiveProgress() {
@@ -649,7 +747,7 @@ function resetGame({ newSeed, newDensity, preserveView = false, skipSaveClear = 
   cellStates.clear();
   blockStates.clear();
   clearBoardGraphics();
-  state.needsRender = true;
+  requestRender({ content: true });
 }
 
 function updateStatus(message, color) {
@@ -1311,7 +1409,7 @@ function applySavedGame(data) {
     evaluateAllLockedBlocks();
 
     updateStatus();
-    state.needsRender = true;
+    requestRender({ content: true });
     const canonical = collectSaveData();
     const snapshot = encodeSaveData(canonical);
     if (snapshot) {
@@ -1479,7 +1577,28 @@ function refreshVisibleCells() {
   const minCellY = Math.floor(topLeft.y / CELL_SIZE) - 1;
   const maxCellY = Math.floor(bottomRight.y / CELL_SIZE) + 1;
 
-  if (state.scale < GROUPING_THRESHOLD) {
+  const mode = state.scale < GROUPING_THRESHOLD ? "chunks" : "cells";
+  const contentVersion = renderInvalidation.contentVersion;
+
+  if (
+    viewState.lastMode === mode &&
+    viewState.lastMinCellX === minCellX &&
+    viewState.lastMaxCellX === maxCellX &&
+    viewState.lastMinCellY === minCellY &&
+    viewState.lastMaxCellY === maxCellY &&
+    viewState.lastContentVersion === contentVersion
+  ) {
+    return;
+  }
+
+  viewState.lastMode = mode;
+  viewState.lastMinCellX = minCellX;
+  viewState.lastMaxCellX = maxCellX;
+  viewState.lastMinCellY = minCellY;
+  viewState.lastMaxCellY = maxCellY;
+  viewState.lastContentVersion = contentVersion;
+
+  if (mode === "chunks") {
     chunkLayer.visible = true;
     cellLayer.visible = false;
     updateChunkLayer(minCellX, maxCellX, minCellY, maxCellY);
@@ -1596,7 +1715,7 @@ function ensureStartingRegion(x, y) {
     const { bx, by } = parseBlockKey(bKey);
     refreshBlockGraphics(bx, by);
   }
-  state.needsRender = true;
+  requestRender({ content: true });
 }
 
 function revealCell(x, y) {
@@ -1622,7 +1741,7 @@ function revealCell(x, y) {
     return false;
   }
 
-  let anyRevealed = false;
+  let revealedCount = 0;
 
   if (start.mine) {
     lockBlock(bx, by);
@@ -1650,7 +1769,7 @@ function revealCell(x, y) {
     state.revealedSafe += 1;
     syncCellGraphic(cx, cy);
     registerRevealedCell(cx, cy);
-    anyRevealed = true;
+    revealedCount += 1;
 
     if (cell.adjacent === 0) {
       for (const [dx, dy] of neighborOffsets) {
@@ -1665,11 +1784,12 @@ function revealCell(x, y) {
   }
 
   updateStatus();
-  if (anyRevealed) {
-    state.needsRender = true;
+  if (revealedCount > 0) {
+    requestRender({ content: true });
+    playRevealSound(revealedCount);
     scheduleSave({ immediate: true });
   }
-  return anyRevealed;
+  return revealedCount > 0;
 }
 
 function warnIfOverFlagged(x, y) {
@@ -1715,7 +1835,7 @@ function toggleFlag(x, y) {
   }
   syncCellGraphic(x, y);
   checkBlockAutoComplete(bx, by);
-  state.needsRender = true;
+  requestRender({ content: true });
   scheduleSave();
   return true;
 }
@@ -1822,7 +1942,7 @@ function applyPinchGesture() {
   state.pointer.pinchCenterY = centerY;
   state.pointer.pinchStartDistance = distance > 0 ? distance : state.pointer.pinchStartDistance;
   state.pointer.pinchStartScale = state.scale;
-  state.needsRender = true;
+  requestRender();
   scheduleSave();
 }
 
@@ -1838,7 +1958,7 @@ function handleWheel(event) {
     offsetX - worldBefore.x * state.scale,
     offsetY - worldBefore.y * state.scale
   );
-  state.needsRender = true;
+  requestRender();
   scheduleSave();
 }
 
@@ -1865,6 +1985,7 @@ function scheduleLongPress(event) {
 }
 
 function onPointerDown(event) {
+  resumeAudioContext();
   const pointerId = event.pointerId;
   if (state.pointer.pointerId === null) {
     state.pointer.pointerId = pointerId;
@@ -1959,7 +2080,7 @@ function onPointerMove(event) {
   if (state.pointer.dragging) {
     board.position.x += dx;
     board.position.y += dy;
-    state.needsRender = true;
+    requestRender();
     scheduleSave();
     hideTargetIndicator();
   } else {
@@ -2053,7 +2174,7 @@ app.ticker.add(() => {
 });
 
 window.addEventListener("resize", () => {
-  state.needsRender = true;
+  requestRender();
 });
 
 if (hud.toggleButton) {
