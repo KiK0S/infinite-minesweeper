@@ -1,50 +1,58 @@
 import * as PIXI from "https://cdn.jsdelivr.net/npm/pixi.js@7.3.3/dist/pixi.mjs";
 
+const DEVICE_RESOLUTION = Math.min(window.devicePixelRatio || 1, 3);
+const TEXT_RESOLUTION = Math.max(DEVICE_RESOLUTION, 2);
+PIXI.Text.defaultResolution = TEXT_RESOLUTION;
+
 const CELL_SIZE = 24;
 const CHUNK_SIZE = 8;
-const BLOCK_SIZE = 30;
+const BLOCK_SIZE = 20;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 3.2;
 const GROUPING_THRESHOLD = 0.65;
-const BACKGROUND_COLOR = 0x0f172a;
-const REVEALED_COLOR = 0x1e293b;
-const EXPLODED_COLOR = 0xb91c1c;
+const BACKGROUND_COLOR = 0xe2e8f0;
+const REVEALED_COLOR = 0xf8fafc;
+const EXPLODED_COLOR = 0xfca5a5;
 
 const NUMBER_COLORS = {
-  1: "#38bdf8",
-  2: "#4ade80",
-  3: "#f87171",
-  4: "#a855f7",
-  5: "#f97316",
-  6: "#0ea5e9",
-  7: "#fbbf24",
-  8: "#cbd5f5",
+  1: "#1d4ed8",
+  2: "#15803d",
+  3: "#dc2626",
+  4: "#7c3aed",
+  5: "#b45309",
+  6: "#0f766e",
+  7: "#be123c",
+  8: "#334155",
 };
 
 const styles = {
   flag: new PIXI.TextStyle({
-    fill: "#fb7185",
+    fill: "#dc2626",
     fontSize: 18,
     fontWeight: "700",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
+    resolution: TEXT_RESOLUTION,
   }),
   mine: new PIXI.TextStyle({
-    fill: "#facc15",
+    fill: "#b91c1c",
     fontSize: 20,
     fontWeight: "700",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
+    resolution: TEXT_RESOLUTION,
   }),
   empty: new PIXI.TextStyle({
-    fill: "#f8fafc",
+    fill: "#475569",
     fontSize: 15,
     fontWeight: "600",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
+    resolution: TEXT_RESOLUTION,
   }),
   lock: new PIXI.TextStyle({
-    fill: "#facc15",
+    fill: "#b45309",
     fontSize: 18,
     fontWeight: "600",
     fontFamily: "Inter, 'Segoe UI', sans-serif",
+    resolution: TEXT_RESOLUTION,
   }),
 };
 
@@ -54,10 +62,11 @@ function styleForNumber(value) {
     numberStyles.set(
       value,
       new PIXI.TextStyle({
-        fill: NUMBER_COLORS[value] ?? "#e2e8f0",
+        fill: NUMBER_COLORS[value] ?? "#1f2937",
         fontSize: 18,
         fontWeight: "700",
         fontFamily: "Inter, 'Segoe UI', sans-serif",
+        resolution: TEXT_RESOLUTION,
       })
     );
   }
@@ -79,6 +88,8 @@ const app = new PIXI.Application({
   backgroundAlpha: 0,
   antialias: true,
   resizeTo: window,
+  autoDensity: true,
+  resolution: DEVICE_RESOLUTION,
 });
 
 document.body.appendChild(app.view);
@@ -180,9 +191,9 @@ const blockStates = new Map();
 const CHUNK_WORLD_SIZE = CHUNK_SIZE * CELL_SIZE;
 
 const chunkStyles = {
-  untouched: { fill: 0x0f172a, alpha: 0.22, border: 0x1e293b, borderAlpha: 0.28 },
-  interesting: { fill: 0x38bdf8, alpha: 0.24, border: 0x7dd3fc, borderAlpha: 0.45 },
-  danger: { fill: EXPLODED_COLOR, alpha: 0.35, border: 0xf87171, borderAlpha: 0.6 },
+  untouched: { fill: 0xffffff, alpha: 0.35, border: 0x94a3b8, borderAlpha: 0.45 },
+  interesting: { fill: 0xbae6fd, alpha: 0.4, border: 0x38bdf8, borderAlpha: 0.6 },
+  danger: { fill: EXPLODED_COLOR, alpha: 0.45, border: 0xf87171, borderAlpha: 0.7 },
 };
 
 function setHudCollapsed(collapsed) {
@@ -634,13 +645,13 @@ function updateStatus(message, color) {
 
   if (state.exploded) {
     hud.status.textContent = "Boom! That was a mine. Reset or try a new seed.";
-    hud.status.style.color = "#fca5a5";
+    hud.status.style.color = "#b91c1c";
   } else if (state.revealedSafe > 0) {
     hud.status.textContent = `Safe tiles revealed: ${state.revealedSafe}`;
-    hud.status.style.color = "#bbf7d0";
+    hud.status.style.color = "#166534";
   } else {
     hud.status.textContent = "";
-    hud.status.style.color = "#fca5a5";
+    hud.status.style.color = "#b91c1c";
   }
 }
 
@@ -917,6 +928,8 @@ function createCellGraphic(x, y) {
   const label = new PIXI.Text("", styles.empty);
   label.anchor.set(0.5);
   label.position.set(CELL_SIZE / 2, CELL_SIZE / 2);
+  label.resolution = TEXT_RESOLUTION;
+  label.roundPixels = true;
   container.addChild(label);
 
   cellLayer.addChild(container);
@@ -939,15 +952,16 @@ function syncCellGraphic(x, y) {
   const locked = isCellLocked(x, y);
 
   background.clear();
-  background.lineStyle(1, locked ? 0xfca5a5 : 0x000000, revealed ? 0.25 : locked ? 0.6 : 0.45);
+  const borderColor = locked ? 0xf97316 : 0x94a3b8;
+  background.lineStyle(1, borderColor, revealed ? 0.35 : locked ? 0.8 : 0.55);
   const fillColor = revealed
     ? mine
       ? EXPLODED_COLOR
       : REVEALED_COLOR
     : locked
-    ? 0x7f1d1d
+    ? 0xfef3c7
     : BACKGROUND_COLOR;
-  const fillAlpha = revealed ? 0.95 : locked ? 0.9 : 0.92;
+  const fillAlpha = revealed ? 1 : locked ? 1 : 0.95;
   background.beginFill(fillColor, fillAlpha);
   background.drawRoundedRect(0, 0, CELL_SIZE, CELL_SIZE, Math.min(10, CELL_SIZE / 4));
   background.endFill();
