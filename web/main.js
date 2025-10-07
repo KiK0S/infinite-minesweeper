@@ -135,6 +135,48 @@ const hud = {
   status: document.getElementById("status"),
 };
 
+const touchOnlyElements = Array.from(document.querySelectorAll("[data-touch-only]"));
+
+const coarsePointerQuery =
+  typeof window.matchMedia === "function" ? window.matchMedia("(any-pointer: coarse)") : null;
+
+function hasCoarsePointer() {
+  const coarseMatches = coarsePointerQuery?.matches === true;
+  const hasTouchPoints =
+    typeof navigator !== "undefined" && typeof navigator.maxTouchPoints === "number"
+      ? navigator.maxTouchPoints > 0
+      : false;
+  const hasMsTouchPoints =
+    typeof navigator !== "undefined" && typeof navigator.msMaxTouchPoints === "number"
+      ? navigator.msMaxTouchPoints > 0
+      : false;
+  return coarseMatches || hasTouchPoints || hasMsTouchPoints;
+}
+
+function updateTouchOnlyVisibility() {
+  const shouldShow = hasCoarsePointer();
+  for (const element of touchOnlyElements) {
+    if (shouldShow) {
+      element.removeAttribute("hidden");
+    } else {
+      element.setAttribute("hidden", "");
+    }
+  }
+}
+
+updateTouchOnlyVisibility();
+
+if (coarsePointerQuery) {
+  const listener = () => {
+    updateTouchOnlyVisibility();
+  };
+  if (typeof coarsePointerQuery.addEventListener === "function") {
+    coarsePointerQuery.addEventListener("change", listener);
+  } else if (typeof coarsePointerQuery.addListener === "function") {
+    coarsePointerQuery.addListener(listener);
+  }
+}
+
 const overlays = {
   targetIndicator: document.getElementById("target-indicator"),
   actionWarning: document.getElementById("action-warning"),
@@ -242,6 +284,29 @@ function requestRender({ content = false } = {}) {
   }
 }
 
+function resolvePointerType(event) {
+  const candidates = [
+    event?.pointerType,
+    event?.nativeEvent?.pointerType,
+    event?.originalEvent?.pointerType,
+    event?.data?.pointerType,
+    event?.data?.originalEvent?.pointerType,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0) {
+      return candidate;
+    }
+  }
+  if (hasCoarsePointer()) {
+    return "touch";
+  }
+  return state.pointer.pointerType ?? "mouse";
+}
+
+function supportsLongPress(pointerType) {
+  return pointerType === "touch" || pointerType === "pen";
+}
+
 function setLongPressDuration(duration, { schedule = false } = {}) {
   const normalized = normalizeLongPressDuration(duration);
   state.longPressDuration = normalized;
@@ -250,6 +315,10 @@ function setLongPressDuration(duration, { schedule = false } = {}) {
   }
   if (hud.flagHoldValue) {
     hud.flagHoldValue.textContent = formatLongPressDuration(normalized);
+  }
+  if (state.pointer.longPressTimeout !== null && supportsLongPress(state.pointer.pointerType)) {
+    cancelLongPressTimer();
+    armLongPressTimer(normalized);
   }
   if (schedule && !state.restoring) {
     scheduleSave();
@@ -2298,6 +2367,16 @@ function handleWheel(event) {
   scheduleSave();
 }
 
+function armLongPressTimer(duration) {
+  const cellX = state.pointer.startCellX;
+  const cellY = state.pointer.startCellY;
+  state.pointer.longPressTimeout = window.setTimeout(() => {
+    state.pointer.longPressTimeout = null;
+    state.pointer.longPressTriggered = true;
+    toggleFlag(cellX, cellY);
+  }, duration);
+}
+
 function cancelLongPressTimer() {
   if (state.pointer.longPressTimeout !== null) {
     clearTimeout(state.pointer.longPressTimeout);
@@ -2307,17 +2386,15 @@ function cancelLongPressTimer() {
 
 function scheduleLongPress(event) {
   cancelLongPressTimer();
-  if (state.pointer.pointerType === "mouse") {
+  const pointerType = resolvePointerType(event);
+  state.pointer.pointerType = pointerType;
+  if (!supportsLongPress(pointerType)) {
     return;
   }
   const { cx, cy } = screenToCell(event.global.x, event.global.y);
   state.pointer.startCellX = cx;
   state.pointer.startCellY = cy;
-  state.pointer.longPressTimeout = window.setTimeout(() => {
-    state.pointer.longPressTimeout = null;
-    state.pointer.longPressTriggered = true;
-    toggleFlag(state.pointer.startCellX, state.pointer.startCellY);
-  }, normalizeLongPressDuration(state.longPressDuration));
+  armLongPressTimer(normalizeLongPressDuration(state.longPressDuration));
 }
 
 function onPointerDown(event) {
@@ -2326,7 +2403,7 @@ function onPointerDown(event) {
   if (state.pointer.pointerId === null) {
     state.pointer.pointerId = pointerId;
     state.pointer.button = typeof event.button === "number" ? event.button : 0;
-    state.pointer.pointerType = event.pointerType ?? event.data?.pointerType ?? "mouse";
+    state.pointer.pointerType = resolvePointerType(event);
     state.pointer.startX = event.global.x;
     state.pointer.startY = event.global.y;
     state.pointer.lastX = event.global.x;
@@ -2573,13 +2650,17 @@ hud.densityInput.addEventListener("change", (event) => {
 if (hud.flagHoldInput) {
   hud.flagHoldInput.addEventListener("input", (event) => {
     const value = Number.parseInt(event.target.value, 10);
-    setLongPressDuration(value);
+    if (!Number.isNaN(value)) {
+      setLongPressDuration(value);
+    }
   });
 
   hud.flagHoldInput.addEventListener("change", (event) => {
     resumeAudioContext();
     const value = Number.parseInt(event.target.value, 10);
-    setLongPressDuration(value, { schedule: true });
+    if (!Number.isNaN(value)) {
+      setLongPressDuration(value, { schedule: true });
+    }
   });
 }
 
