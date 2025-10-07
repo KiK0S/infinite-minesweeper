@@ -6,13 +6,15 @@ PIXI.Text.defaultResolution = TEXT_RESOLUTION;
 
 const CELL_SIZE = 24;
 const CHUNK_SIZE = 8;
-const BLOCK_SIZE = 20;
+const BLOCK_SIZE = 12;
+const LEGACY_BLOCK_SIZE = 20;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 3.2;
 const GROUPING_THRESHOLD = 0.65;
 const BACKGROUND_COLOR = 0xe2e8f0;
 const REVEALED_COLOR = 0xf8fafc;
 const EXPLODED_COLOR = 0xfca5a5;
+const BLOCK_LOCK_MISTAKE_THRESHOLD = 1;
 
 const NUMBER_COLORS = {
   1: "#1d4ed8",
@@ -136,8 +138,8 @@ const overlays = {
   actionWarning: document.getElementById("action-warning"),
 };
 
-const STORAGE_KEY = "infinite-minesweeper-save-v3";
-const LEGACY_STORAGE_KEYS = ["infinite-minesweeper-save-v2"];
+const STORAGE_KEY = "infinite-minesweeper-save-v4";
+const LEGACY_STORAGE_KEYS = ["infinite-minesweeper-save-v3", "infinite-minesweeper-save-v2"];
 const SAVE_DEBOUNCE = 250;
 const SAVE_INTERVAL = 60_000;
 const textEncoder = new TextEncoder();
@@ -224,6 +226,7 @@ const AudioContextClass =
 const audioState = {
   context: null,
   masterGain: null,
+  lastWarningTime: 0,
 };
 
 function getAudioContext() {
@@ -246,7 +249,14 @@ function resumeAudioContext() {
   }
 }
 
-function playRevealSound(revealedCount = 1) {
+function playTone({
+  startFrequency,
+  endFrequency = startFrequency,
+  duration = 0.25,
+  gain = 0.12,
+  type = "sine",
+  attack = 0.02,
+}) {
   const context = getAudioContext();
   if (!context || context.state === "suspended") {
     return;
@@ -254,20 +264,18 @@ function playRevealSound(revealedCount = 1) {
 
   const now = context.currentTime;
   const oscillator = context.createOscillator();
-  const envelope = context.createGain();
-  const clampedCount = Math.min(Math.max(revealedCount, 1), 12);
-  const baseFrequency = 420;
-  const frequencyJitter = Math.random() * 60;
-  oscillator.frequency.setValueAtTime(
-    baseFrequency + clampedCount * 25 + frequencyJitter,
-    now
-  );
-  oscillator.type = "triangle";
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(startFrequency, now);
+  if (typeof endFrequency === "number" && endFrequency !== startFrequency) {
+    oscillator.frequency.linearRampToValueAtTime(endFrequency, now + duration);
+  }
 
+  const envelope = context.createGain();
+  const peakGain = Math.max(0.0002, gain);
   envelope.gain.setValueAtTime(0.0001, now);
-  const peakGain = Math.min(0.25, 0.08 + clampedCount * 0.01);
-  envelope.gain.exponentialRampToValueAtTime(peakGain, now + 0.02);
-  envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+  const clampedAttack = Math.max(0.005, Math.min(attack, duration * 0.5));
+  envelope.gain.exponentialRampToValueAtTime(peakGain, now + clampedAttack);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
   oscillator.connect(envelope);
   if (audioState.masterGain) {
@@ -281,7 +289,119 @@ function playRevealSound(revealedCount = 1) {
     envelope.disconnect();
   };
   oscillator.start(now);
-  oscillator.stop(now + 0.3);
+  oscillator.stop(now + duration + 0.05);
+}
+
+function playRevealSound(revealedCount = 1) {
+  const clampedCount = Math.min(Math.max(revealedCount, 1), 16);
+  const baseFrequency = 420;
+  const frequencyJitter = Math.random() * 40;
+  playTone({
+    type: "triangle",
+    startFrequency: baseFrequency + clampedCount * 22 + frequencyJitter,
+    endFrequency: baseFrequency + clampedCount * 28 + frequencyJitter + 18,
+    duration: 0.26,
+    gain: Math.min(0.24, 0.08 + clampedCount * 0.012),
+    attack: 0.015,
+  });
+}
+
+function playFlagSound(placing) {
+  playTone({
+    type: placing ? "square" : "sawtooth",
+    startFrequency: placing ? 720 + Math.random() * 40 : 420,
+    endFrequency: placing ? 880 + Math.random() * 40 : 280,
+    duration: placing ? 0.18 : 0.22,
+    gain: placing ? 0.16 : 0.12,
+    attack: 0.01,
+  });
+}
+
+function playChordSound(revealedCount = 1) {
+  const sizeFactor = Math.min(Math.max(revealedCount, 1), 12);
+  playTone({
+    type: "triangle",
+    startFrequency: 520,
+    endFrequency: 620 + sizeFactor * 18,
+    duration: 0.28,
+    gain: 0.18,
+    attack: 0.012,
+  });
+}
+
+function playWarningSound() {
+  const context = getAudioContext();
+  if (!context || context.state === "suspended") {
+    return;
+  }
+  if (context.currentTime - audioState.lastWarningTime < 0.12) {
+    return;
+  }
+  audioState.lastWarningTime = context.currentTime;
+  playTone({
+    type: "sawtooth",
+    startFrequency: 260,
+    endFrequency: 180,
+    duration: 0.24,
+    gain: 0.14,
+    attack: 0.008,
+  });
+}
+
+function playLockSound() {
+  playTone({
+    type: "square",
+    startFrequency: 200,
+    endFrequency: 120,
+    duration: 0.35,
+    gain: 0.18,
+    attack: 0.02,
+  });
+}
+
+function playUnlockSound(blockCount = 1) {
+  const factor = Math.min(Math.max(blockCount, 1), 8);
+  playTone({
+    type: "triangle",
+    startFrequency: 360,
+    endFrequency: 520 + factor * 24,
+    duration: 0.32,
+    gain: 0.16,
+    attack: 0.01,
+  });
+}
+
+function playMineWarningSound() {
+  playTone({
+    type: "sawtooth",
+    startFrequency: 160,
+    endFrequency: 90,
+    duration: 0.3,
+    gain: 0.2,
+    attack: 0.01,
+  });
+}
+
+function playResetSound() {
+  playTone({
+    type: "triangle",
+    startFrequency: 480,
+    endFrequency: 540,
+    duration: 0.25,
+    gain: 0.14,
+    attack: 0.015,
+  });
+}
+
+function playUiClickSound() {
+  playTone({
+    type: "square",
+    startFrequency: 520,
+    endFrequency: 460,
+    duration: 0.16,
+    gain: 0.1,
+    attack: 0.01,
+  });
 }
 
 const mineCache = new Map();
@@ -297,6 +417,127 @@ const chunkStyles = {
   interesting: { fill: 0xbae6fd, alpha: 0.4, border: 0x38bdf8, borderAlpha: 0.6 },
   danger: { fill: EXPLODED_COLOR, alpha: 0.45, border: 0xf87171, borderAlpha: 0.7 },
 };
+
+let cellTextureCache = null;
+
+function generateCellTexture({
+  fillColor,
+  fillAlpha,
+  borderColor,
+  borderAlpha,
+  icon,
+  iconStyle,
+}) {
+  const container = new PIXI.Container();
+  const background = new PIXI.Graphics();
+  background.lineStyle(1, borderColor, borderAlpha);
+  background.beginFill(fillColor, fillAlpha);
+  background.drawRoundedRect(0, 0, CELL_SIZE, CELL_SIZE, Math.min(10, CELL_SIZE / 4));
+  background.endFill();
+  container.addChild(background);
+
+  if (icon) {
+    const text = new PIXI.Text(icon, iconStyle);
+    text.anchor.set(0.5);
+    text.position.set(CELL_SIZE / 2, CELL_SIZE / 2);
+    text.resolution = TEXT_RESOLUTION;
+    text.roundPixels = true;
+    container.addChild(text);
+  }
+
+  const texture = app.renderer.generateTexture(container, {
+    resolution: DEVICE_RESOLUTION,
+    scaleMode: PIXI.SCALE_MODES.LINEAR,
+  });
+  container.destroy({ children: true });
+  return texture;
+}
+
+function buildCellTextures() {
+  const textures = {
+    hidden: generateCellTexture({
+      fillColor: BACKGROUND_COLOR,
+      fillAlpha: 0.95,
+      borderColor: 0x94a3b8,
+      borderAlpha: 0.55,
+    }),
+    locked: generateCellTexture({
+      fillColor: 0xfef3c7,
+      fillAlpha: 1,
+      borderColor: 0xf97316,
+      borderAlpha: 0.8,
+      icon: "🔒",
+      iconStyle: styles.lock,
+    }),
+    flagged: generateCellTexture({
+      fillColor: BACKGROUND_COLOR,
+      fillAlpha: 0.95,
+      borderColor: 0x94a3b8,
+      borderAlpha: 0.55,
+      icon: "⚑",
+      iconStyle: styles.flag,
+    }),
+    revealedEmpty: generateCellTexture({
+      fillColor: REVEALED_COLOR,
+      fillAlpha: 1,
+      borderColor: 0x94a3b8,
+      borderAlpha: 0.35,
+    }),
+    revealedMine: generateCellTexture({
+      fillColor: EXPLODED_COLOR,
+      fillAlpha: 1,
+      borderColor: 0x94a3b8,
+      borderAlpha: 0.35,
+      icon: "💣",
+      iconStyle: styles.mine,
+    }),
+    numbers: new Map(),
+  };
+
+  for (let value = 1; value <= 8; value += 1) {
+    textures.numbers.set(
+      value,
+      generateCellTexture({
+        fillColor: REVEALED_COLOR,
+        fillAlpha: 1,
+        borderColor: 0x94a3b8,
+        borderAlpha: 0.35,
+        icon: String(value),
+        iconStyle: styleForNumber(value),
+      })
+    );
+  }
+
+  return textures;
+}
+
+function getCellTextures() {
+  if (!cellTextureCache) {
+    cellTextureCache = buildCellTextures();
+  }
+  return cellTextureCache;
+}
+
+function cellTextureForState({ revealed, flagged, mine, locked, adjacent }) {
+  const textures = getCellTextures();
+  if (revealed) {
+    if (mine) {
+      return { key: "revealed-mine", texture: textures.revealedMine };
+    }
+    if (adjacent > 0) {
+      const value = Math.min(adjacent, 8);
+      return { key: `revealed-${value}`, texture: textures.numbers.get(value) };
+    }
+    return { key: "revealed-0", texture: textures.revealedEmpty };
+  }
+  if (flagged) {
+    return { key: "flagged", texture: textures.flagged };
+  }
+  if (locked) {
+    return { key: "locked", texture: textures.locked };
+  }
+  return { key: "hidden", texture: textures.hidden };
+}
 
 function setHudCollapsed(collapsed) {
   state.hudCollapsed = collapsed;
@@ -381,6 +622,7 @@ function getBlockState(bx, by) {
       minePositions,
       safeCells,
       revealedSafe: 0,
+      mistakeCount: 0,
       locked: false,
       completed: safeCells === 0,
     };
@@ -406,6 +648,25 @@ function blockSafeCellsLeft(block) {
   return Math.max(block.safeCells - block.revealedSafe, 0);
 }
 
+function registerBlockMistake(block) {
+  if (!block || block.completed) {
+    return block;
+  }
+  block.mistakeCount = Math.max(block.mistakeCount ?? 0, 0) + 1;
+  const remaining = BLOCK_LOCK_MISTAKE_THRESHOLD - block.mistakeCount;
+  if (remaining <= 0) {
+    lockBlock(block.bx, block.by);
+    showWarning("Block locked! Solve the surrounding blocks to unlock it.");
+  } else {
+    const message =
+      remaining === 1
+        ? "Careful! One more mistake will lock this block."
+        : `Careful! ${remaining} more mistakes will lock this block.`;
+    showWarning(message);
+  }
+  return block;
+}
+
 function registerRevealedCell(x, y) {
   const cell = ensureCellDetails(getCellState(x, y));
   if (cell.mine || cell.blockCounted) {
@@ -426,6 +687,7 @@ function handleBlockCompletion(block) {
   }
   block.completed = true;
   block.locked = false;
+  block.mistakeCount = 0;
   refreshBlockGraphics(block.bx, block.by);
   requestRender({ content: true });
   scheduleSave({ immediate: true });
@@ -443,8 +705,12 @@ function lockBlock(bx, by) {
     return block;
   }
   block.locked = true;
+  block.mistakeCount = Math.max(block.mistakeCount ?? 0, BLOCK_LOCK_MISTAKE_THRESHOLD);
   refreshBlockGraphics(bx, by);
   requestRender({ content: true });
+  if (!state.restoring) {
+    playLockSound();
+  }
   scheduleSave();
   return block;
 }
@@ -507,7 +773,11 @@ function unlockRegionIfPossible(startBx, startBy, visited) {
 
   for (const block of region) {
     block.locked = false;
+    block.mistakeCount = 0;
     refreshBlockGraphics(block.bx, block.by);
+  }
+  if (!state.restoring) {
+    playUnlockSound(region.length);
   }
   requestRender({ content: true });
   scheduleSave();
@@ -522,6 +792,7 @@ function isCellLocked(x, y) {
 
 function autoCompleteBlock(block) {
   let changed = false;
+  let revealedCount = 0;
   forEachCellInBlock(block.bx, block.by, (x, y) => {
     const cell = ensureCellDetails(getCellState(x, y));
     if (!cell.mine && !cell.revealed) {
@@ -530,10 +801,13 @@ function autoCompleteBlock(block) {
       registerRevealedCell(x, y);
       syncCellGraphic(x, y);
       changed = true;
+      revealedCount += 1;
     }
   });
 
   if (changed) {
+    playRevealSound(revealedCount);
+    playChordSound(revealedCount);
     updateStatus();
     requestRender({ content: true });
     scheduleSave();
@@ -679,8 +953,8 @@ function screenToCell(screenX, screenY) {
 }
 
 function clearBoardGraphics() {
-  for (const { container } of cellGraphics.values()) {
-    container.destroy({ children: true });
+  for (const { sprite } of cellGraphics.values()) {
+    sprite.destroy();
   }
   cellGraphics.clear();
   cellLayer.removeChildren();
@@ -778,6 +1052,7 @@ function showWarning(message, duration = 1600) {
   }
   warning.textContent = message;
   warning.classList.add("is-visible");
+  playWarningSound();
   if (warningTimeoutId) {
     clearTimeout(warningTimeoutId);
   }
@@ -947,6 +1222,7 @@ function collectSaveData() {
     revealedSafe: state.revealedSafe,
     exploded: state.exploded,
     lockedBlocks,
+    blockSize: BLOCK_SIZE,
   };
 }
 
@@ -1052,6 +1328,9 @@ function encodeSaveData(data) {
     const cells = Array.from(cellsMap.values());
     cells.sort((a, b) => a.x - b.x || a.y - b.y);
 
+    const rawBlockSize = Number.isFinite(data.blockSize) ? Math.trunc(data.blockSize) : BLOCK_SIZE;
+    const blockSize = Math.max(1, rawBlockSize);
+
     let totalSize = 4; // Header
     totalSize += 2 + seedBytes.length;
     totalSize += 4 * 4; // mineDensity, scale, boardX, boardY
@@ -1064,6 +1343,7 @@ function encodeSaveData(data) {
     totalSize += 4; // revealedSafe
     totalSize += 1; // exploded
     totalSize += 4 + normalizedLockedBlocks.length * 8;
+    totalSize += 2; // blockSize
     totalSize += 4 + normalizedForcedSafe.length * 8;
     totalSize += 4 + cells.length * 9;
 
@@ -1075,7 +1355,7 @@ function encodeSaveData(data) {
     bytes[offset++] = 0x49; // I
     bytes[offset++] = 0x4d; // M
     bytes[offset++] = 0x53; // S
-    bytes[offset++] = 0x01; // version 1
+    bytes[offset++] = 0x02; // version 2
 
     view.setUint16(offset, seedBytes.length, true);
     offset += 2;
@@ -1118,6 +1398,9 @@ function encodeSaveData(data) {
       offset += 4;
     }
 
+    view.setUint16(offset, blockSize, true);
+    offset += 2;
+
     view.setUint32(offset, normalizedForcedSafe.length, true);
     offset += 4;
     for (const cell of normalizedForcedSafe) {
@@ -1155,7 +1438,7 @@ function decodeSaveData(base64) {
       return null;
     }
     const version = bytes[3];
-    if (version !== 0x01) {
+    if (version !== 0x01 && version !== 0x02) {
       return null;
     }
 
@@ -1228,6 +1511,18 @@ function decodeSaveData(base64) {
       lockedBlocks.push([bx, by]);
     }
 
+    let savedBlockSize = version === 0x01 ? LEGACY_BLOCK_SIZE : BLOCK_SIZE;
+    if (version >= 0x02) {
+      if (offset + 2 > view.byteLength) {
+        return null;
+      }
+      const parsedBlockSize = view.getUint16(offset, true);
+      offset += 2;
+      if (parsedBlockSize > 0) {
+        savedBlockSize = parsedBlockSize;
+      }
+    }
+
     if (offset + 4 > view.byteLength) {
       return null;
     }
@@ -1281,6 +1576,7 @@ function decodeSaveData(base64) {
       revealedSafe,
       exploded,
       lockedBlocks,
+      blockSize: savedBlockSize,
       forcedSafe,
       revealed,
       flagged,
@@ -1393,7 +1689,14 @@ function applySavedGame(data) {
       state.revealedSafe = data.revealedSafe;
     }
 
-    const lockedList = Array.isArray(data.lockedBlocks) ? data.lockedBlocks : [];
+    const savedBlockSize =
+      typeof data.blockSize === "number" && Number.isFinite(data.blockSize)
+        ? Math.max(1, Math.trunc(data.blockSize))
+        : LEGACY_BLOCK_SIZE;
+    const lockedList =
+      savedBlockSize === BLOCK_SIZE && Array.isArray(data.lockedBlocks)
+        ? data.lockedBlocks
+        : [];
     for (const entry of lockedList) {
       if (!Array.isArray(entry) || entry.length < 2) {
         continue;
@@ -1426,21 +1729,15 @@ function applySavedGame(data) {
 }
 
 function createCellGraphic(x, y) {
-  const container = new PIXI.Container();
-  container.position.set(x * CELL_SIZE, y * CELL_SIZE);
-
-  const background = new PIXI.Graphics();
-  container.addChild(background);
-
-  const label = new PIXI.Text("", styles.empty);
-  label.anchor.set(0.5);
-  label.position.set(CELL_SIZE / 2, CELL_SIZE / 2);
-  label.resolution = TEXT_RESOLUTION;
-  label.roundPixels = true;
-  container.addChild(label);
-
-  cellLayer.addChild(container);
-  cellGraphics.set(cellKey(x, y), { container, background, label });
+  const textures = getCellTextures();
+  const sprite = new PIXI.Sprite(textures.hidden);
+  sprite.position.set(x * CELL_SIZE, y * CELL_SIZE);
+  sprite.width = CELL_SIZE;
+  sprite.height = CELL_SIZE;
+  sprite.eventMode = "none";
+  sprite.roundPixels = true;
+  cellLayer.addChild(sprite);
+  cellGraphics.set(cellKey(x, y), { sprite, textureKey: null });
   syncCellGraphic(x, y);
 }
 
@@ -1450,7 +1747,6 @@ function syncCellGraphic(x, y) {
   if (!graphic) {
     return;
   }
-  const { background, label } = graphic;
   let stateForCell = cellStates.get(key);
   if (stateForCell && stateForCell.revealed && !stateForCell.detailsComputed) {
     stateForCell = ensureCellDetails(stateForCell);
@@ -1461,39 +1757,17 @@ function syncCellGraphic(x, y) {
   const adjacent = stateForCell?.adjacent ?? 0;
   const locked = isCellLocked(x, y);
 
-  background.clear();
-  const borderColor = locked ? 0xf97316 : 0x94a3b8;
-  background.lineStyle(1, borderColor, revealed ? 0.35 : locked ? 0.8 : 0.55);
-  const fillColor = revealed
-    ? mine
-      ? EXPLODED_COLOR
-      : REVEALED_COLOR
-    : locked
-    ? 0xfef3c7
-    : BACKGROUND_COLOR;
-  const fillAlpha = revealed ? 1 : locked ? 1 : 0.95;
-  background.beginFill(fillColor, fillAlpha);
-  background.drawRoundedRect(0, 0, CELL_SIZE, CELL_SIZE, Math.min(10, CELL_SIZE / 4));
-  background.endFill();
+  const { texture, key: textureKey } = cellTextureForState({
+    revealed,
+    flagged,
+    mine,
+    locked,
+    adjacent,
+  });
 
-  if (revealed) {
-    if (mine) {
-      label.text = "💣";
-      label.style = styles.mine;
-    } else if (adjacent > 0) {
-      label.text = String(adjacent);
-      label.style = styleForNumber(adjacent);
-    } else {
-      label.text = "";
-    }
-  } else if (flagged) {
-    label.text = "⚑";
-    label.style = styles.flag;
-  } else if (locked) {
-    label.text = "🔒";
-    label.style = styles.lock;
-  } else {
-    label.text = "";
+  if (texture && graphic.textureKey !== textureKey) {
+    graphic.sprite.texture = texture;
+    graphic.textureKey = textureKey;
   }
 }
 
@@ -1629,7 +1903,7 @@ function refreshVisibleCells() {
   for (const key of toRemove) {
     const graphic = cellGraphics.get(key);
     if (graphic) {
-      graphic.container.destroy({ children: true });
+      graphic.sprite.destroy();
     }
     cellGraphics.delete(key);
   }
@@ -1744,8 +2018,8 @@ function revealCell(x, y) {
   let revealedCount = 0;
 
   if (start.mine) {
-    lockBlock(bx, by);
-    showWarning("Block locked! Solve the surrounding blocks to unlock it.");
+    playMineWarningSound();
+    registerBlockMistake(block);
     return false;
   }
 
@@ -1836,6 +2110,7 @@ function toggleFlag(x, y) {
   syncCellGraphic(x, y);
   checkBlockAutoComplete(bx, by);
   requestRender({ content: true });
+  playFlagSound(cell.flagged);
   scheduleSave();
   return true;
 }
@@ -1878,6 +2153,7 @@ function revealNeighborsOfNumber(x, y) {
   }
 
   let changed = false;
+  let triggered = 0;
 
   for (const [dx, dy] of neighborOffsets) {
     const nx = x + dx;
@@ -1888,10 +2164,15 @@ function revealNeighborsOfNumber(x, y) {
     }
     if (revealCell(nx, ny)) {
       changed = true;
+      triggered += 1;
     }
     if (state.exploded) {
       break;
     }
+  }
+
+  if (triggered > 0) {
+    playChordSound(triggered);
   }
 
   return changed;
@@ -2179,22 +2460,31 @@ window.addEventListener("resize", () => {
 
 if (hud.toggleButton) {
   hud.toggleButton.addEventListener("click", () => {
+    resumeAudioContext();
+    playUiClickSound();
     setHudCollapsed(!state.hudCollapsed);
     scheduleSave();
   });
 }
 
 hud.randomSeedButton.addEventListener("click", () => {
+  resumeAudioContext();
+  playUiClickSound();
+  playResetSound();
   resetGame({ newSeed: randomSeedString() });
 });
 
 hud.resetButton.addEventListener("click", () => {
+  resumeAudioContext();
+  playResetSound();
   resetGame({ preserveView: false });
 });
 
 hud.seedInput.addEventListener("change", (event) => {
+  resumeAudioContext();
   const value = event.target.value.trim();
   if (value.length > 0) {
+    playResetSound();
     resetGame({ newSeed: value });
   }
 });
@@ -2202,8 +2492,10 @@ hud.seedInput.addEventListener("change", (event) => {
 hud.seedInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
+    resumeAudioContext();
     const value = hud.seedInput.value.trim();
     if (value.length > 0) {
+      playResetSound();
       resetGame({ newSeed: value });
     }
   }
@@ -2215,8 +2507,10 @@ hud.densityInput.addEventListener("input", (event) => {
 });
 
 hud.densityInput.addEventListener("change", (event) => {
+  resumeAudioContext();
   const value = parseFloat(event.target.value);
   if (!Number.isNaN(value)) {
+    playResetSound();
     resetGame({ newDensity: value });
   }
 });
@@ -2246,6 +2540,8 @@ window.addEventListener("keydown", (event) => {
 
   event.preventDefault();
   if (confirmReset()) {
+    resumeAudioContext();
+    playResetSound();
     resetGame({ preserveView: false });
   }
 });
