@@ -201,7 +201,8 @@ canvas {
   accent-color: #2563eb;
 }
 
-#density-value {
+#density-value,
+#flag-hold-value {
   margin-left: 0.4rem;
   font-variant-numeric: tabular-nums;
 }

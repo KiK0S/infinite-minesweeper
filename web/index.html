@@ -27,8 +27,15 @@
             <span id="density-value">18%</span>
           </label>
         </div>
+        <div class="hud__controls">
+          <label class="slider">
+            Flag hold time
+            <input id="flag-hold" type="range" min="150" max="900" step="25" value="450" />
+            <span id="flag-hold-value">0.45s</span>
+          </label>
+        </div>
         <p class="hud__hint">
-          Left click or tap to reveal. Right click or long-press to flag. Drag to pan, scroll or pinch to zoom. Press <kbd>R</kbd> to reset the current seed.
+          Left click or tap to reveal. Right click or long-press to flag (adjust hold time above). Drag to pan, scroll or pinch to zoom. Press <kbd>R</kbd> to reset the current seed.
         </p>
         <p class="hud__status" id="status"></p>
       </div>

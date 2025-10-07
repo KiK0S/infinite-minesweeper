@@ -130,6 +130,8 @@ const hud = {
   resetButton: document.getElementById("reset"),
   densityInput: document.getElementById("density"),
   densityValue: document.getElementById("density-value"),
+  flagHoldInput: document.getElementById("flag-hold"),
+  flagHoldValue: document.getElementById("flag-hold-value"),
   status: document.getElementById("status"),
 };
 
@@ -145,7 +147,24 @@ const SAVE_INTERVAL = 60_000;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const START_REGION_SIZE = 30;
-const LONG_PRESS_DURATION = 450;
+const DEFAULT_LONG_PRESS_DURATION = 450;
+const MIN_LONG_PRESS_DURATION = 150;
+const MAX_LONG_PRESS_DURATION = 900;
+
+function normalizeLongPressDuration(value) {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_LONG_PRESS_DURATION;
+  }
+  const rounded = Math.round(value);
+  return Math.min(MAX_LONG_PRESS_DURATION, Math.max(MIN_LONG_PRESS_DURATION, rounded));
+}
+
+function formatLongPressDuration(value) {
+  const normalized = normalizeLongPressDuration(value);
+  let formatted = (normalized / 1000).toFixed(2);
+  formatted = formatted.replace(/0+$/, "").replace(/\.$/, "");
+  return `${formatted}s`;
+}
 
 const forcedSafeCells = new Set();
 let warningTimeoutId = null;
@@ -157,6 +176,9 @@ const state = {
   seed: randomSeedString(),
   seedValue: 1,
   mineDensity: parseFloat(hud.densityInput.value),
+  longPressDuration: normalizeLongPressDuration(
+    Number.parseInt(hud.flagHoldInput?.value ?? DEFAULT_LONG_PRESS_DURATION, 10)
+  ),
   scale: 1,
   pointer: {
     pointerId: null,
@@ -219,6 +241,22 @@ function requestRender({ content = false } = {}) {
     renderInvalidation.contentVersion += 1;
   }
 }
+
+function setLongPressDuration(duration, { schedule = false } = {}) {
+  const normalized = normalizeLongPressDuration(duration);
+  state.longPressDuration = normalized;
+  if (hud.flagHoldInput) {
+    hud.flagHoldInput.value = String(normalized);
+  }
+  if (hud.flagHoldValue) {
+    hud.flagHoldValue.textContent = formatLongPressDuration(normalized);
+  }
+  if (schedule && !state.restoring) {
+    scheduleSave();
+  }
+}
+
+setLongPressDuration(state.longPressDuration);
 
 const AudioContextClass =
   typeof window !== "undefined" ? window.AudioContext || window.webkitAudioContext : null;
@@ -1211,6 +1249,7 @@ function collectSaveData() {
   return {
     seed: state.seed,
     mineDensity: state.mineDensity,
+    longPressDuration: state.longPressDuration,
     scale: state.scale,
     boardPosition: { x: board.position.x, y: board.position.y },
     hudCollapsed: state.hudCollapsed,
@@ -1259,6 +1298,7 @@ function encodeSaveData(data) {
     const boardX = Number.isFinite(boardPosition.x) ? boardPosition.x : 0;
     const boardY = Number.isFinite(boardPosition.y) ? boardPosition.y : 0;
     const hudCollapsed = Boolean(data.hudCollapsed);
+    const longPressDuration = normalizeLongPressDuration(data.longPressDuration);
     const startRegionGenerated = Boolean(data.startRegionGenerated);
     const startRegionOrigin =
       data.startRegionOrigin &&
@@ -1334,6 +1374,7 @@ function encodeSaveData(data) {
     let totalSize = 4; // Header
     totalSize += 2 + seedBytes.length;
     totalSize += 4 * 4; // mineDensity, scale, boardX, boardY
+    totalSize += 2; // longPressDuration
     totalSize += 1; // hudCollapsed
     totalSize += 1; // startRegionGenerated
     totalSize += 1; // startRegionOrigin present flag
@@ -1355,7 +1396,7 @@ function encodeSaveData(data) {
     bytes[offset++] = 0x49; // I
     bytes[offset++] = 0x4d; // M
     bytes[offset++] = 0x53; // S
-    bytes[offset++] = 0x02; // version 2
+    bytes[offset++] = 0x03; // version 3
 
     view.setUint16(offset, seedBytes.length, true);
     offset += 2;
@@ -1370,6 +1411,9 @@ function encodeSaveData(data) {
     offset += 4;
     view.setFloat32(offset, boardY, true);
     offset += 4;
+
+    view.setUint16(offset, longPressDuration, true);
+    offset += 2;
 
     view.setUint8(offset, hudCollapsed ? 1 : 0);
     offset += 1;
@@ -1438,7 +1482,7 @@ function decodeSaveData(base64) {
       return null;
     }
     const version = bytes[3];
-    if (version !== 0x01 && version !== 0x02) {
+    if (version !== 0x01 && version !== 0x02 && version !== 0x03) {
       return null;
     }
 
@@ -1456,7 +1500,8 @@ function decodeSaveData(base64) {
     const seed = textDecoder.decode(bytes.subarray(offset, offset + seedLength));
     offset += seedLength;
 
-    if (offset + 4 * 4 + 3 > view.byteLength) {
+    const headerBytes = 4 * 4 + 3 + (version >= 0x03 ? 2 : 0);
+    if (offset + headerBytes > view.byteLength) {
       return null;
     }
     const mineDensity = view.getFloat32(offset, true);
@@ -1467,6 +1512,12 @@ function decodeSaveData(base64) {
     offset += 4;
     const boardY = view.getFloat32(offset, true);
     offset += 4;
+    let longPressDuration = DEFAULT_LONG_PRESS_DURATION;
+    if (version >= 0x03) {
+      longPressDuration = view.getUint16(offset, true);
+      offset += 2;
+    }
+    longPressDuration = normalizeLongPressDuration(longPressDuration);
     const hudCollapsed = view.getUint8(offset) === 1;
     offset += 1;
     const startRegionGenerated = view.getUint8(offset) === 1;
@@ -1568,6 +1619,7 @@ function decodeSaveData(base64) {
     return {
       seed,
       mineDensity,
+      longPressDuration,
       scale,
       boardPosition: { x: boardX, y: boardY },
       hudCollapsed,
@@ -1640,6 +1692,9 @@ function applySavedGame(data) {
     }
 
     setHudCollapsed(Boolean(data.hudCollapsed));
+    if (typeof data.longPressDuration === "number" && Number.isFinite(data.longPressDuration)) {
+      setLongPressDuration(data.longPressDuration);
+    }
 
     state.startRegionGenerated = Boolean(data.startRegionGenerated) || forcedSafeCells.size > 0;
     if (
@@ -2262,7 +2317,7 @@ function scheduleLongPress(event) {
     state.pointer.longPressTimeout = null;
     state.pointer.longPressTriggered = true;
     toggleFlag(state.pointer.startCellX, state.pointer.startCellY);
-  }, LONG_PRESS_DURATION);
+  }, normalizeLongPressDuration(state.longPressDuration));
 }
 
 function onPointerDown(event) {
@@ -2514,6 +2569,19 @@ hud.densityInput.addEventListener("change", (event) => {
     resetGame({ newDensity: value });
   }
 });
+
+if (hud.flagHoldInput) {
+  hud.flagHoldInput.addEventListener("input", (event) => {
+    const value = Number.parseInt(event.target.value, 10);
+    setLongPressDuration(value);
+  });
+
+  hud.flagHoldInput.addEventListener("change", (event) => {
+    resumeAudioContext();
+    const value = Number.parseInt(event.target.value, 10);
+    setLongPressDuration(value, { schedule: true });
+  });
+}
 
 window.addEventListener("keydown", (event) => {
   if (event.defaultPrevented) {
